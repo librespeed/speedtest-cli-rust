@@ -531,7 +531,7 @@ fn unknown_server_id_fails_cleanly() {
 
 #[test]
 fn out_of_range_numeric_options_are_rejected() {
-    // Clap exits 2 for a usage error.
+    // A usage error exits 1, the way every failure in the Go client does.
     // Only the lower bounds are enforced: before they existed a negative value
     // wrapped into a huge unsigned one, so --upload-size=-1 aborted the process
     // with a capacity overflow and --duration=-1 ran effectively forever.
@@ -544,7 +544,7 @@ fn out_of_range_numeric_options_are_rejected() {
         "--upload-size=0",
     ] {
         let out = run(&[arg, "--list"]);
-        assert_eq!(out.status.code(), Some(2), "{arg} was accepted");
+        assert_eq!(out.status.code(), Some(1), "{arg} was accepted");
     }
 }
 
@@ -580,7 +580,7 @@ fn mutually_exclusive_options_are_rejected() {
         vec!["--server", "1", "--exclude", "2"],
     ] {
         let out = run(&args);
-        assert_eq!(out.status.code(), Some(2), "{args:?} was accepted");
+        assert_eq!(out.status.code(), Some(1), "{args:?} was accepted");
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
     }
 }
