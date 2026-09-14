@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use bytes::Bytes;
 use http::{Method, StatusCode};
-use http_body::{Body, Frame};
+use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -571,6 +571,19 @@ struct UploadBody {
 impl Body for UploadBody {
     type Data = Bytes;
     type Error = std::io::Error;
+
+    /// Without an exact size hyper frames the POST as `Transfer-Encoding:
+    /// chunked`, and a backend whose parser reads fixed blocks rather than
+    /// chunk-decoding then waits for a block that never fills: the request
+    /// never completes and one payload is all the test ever sends. The Go
+    /// client sets Content-Length for the same reason. The endless
+    /// `--no-pre-allocate` stream has no length to declare and stays chunked.
+    fn size_hint(&self) -> SizeHint {
+        match &self.payload {
+            Some(payload) => SizeHint::with_exact((payload.len() - self.pos) as u64),
+            None => SizeHint::default(),
+        }
+    }
 
     fn poll_frame(
         self: Pin<&mut Self>,
