@@ -209,7 +209,7 @@ fn print_version() {
             defs::BUILD_DATE
         );
     }
-    write_out!("https://github.com/BKPepe/speedtest-cli-rust\n");
+    write_out!("{}\n", env!("CARGO_PKG_REPOSITORY"));
     write_out!("Licensed under GNU Lesser General Public License v3.0\n");
     write_out!("LibreSpeed\tCopyright (C) 2016-2020 Federico Dossena\n");
     write_out!("librespeed-cli\tCopyright (C) 2020 Maddie Zhan\n");
