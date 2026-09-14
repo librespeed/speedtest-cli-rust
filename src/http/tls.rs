@@ -102,11 +102,38 @@ mod imp {
         }
     }
 
+    /// Reads and parses a `--ca-cert` bundle, failing the run if it is
+    /// unreadable or holds no certificate, as the Go client does.
+    fn read_ca_bundle(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
+        use rustls_pki_types::pem::PemObject as _;
+
+        let pem = std::fs::read(path)
+            .with_context(|| format!("cannot read CA certificate bundle {}", path.display()))?;
+        let certs = rustls_pki_types::CertificateDer::pem_slice_iter(&pem)
+            .collect::<Result<Vec<_>, _>>()?;
+        if certs.is_empty() {
+            bail!("no certificates found in {}", path.display());
+        }
+        Ok(certs)
+    }
+
     fn client_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
         // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
         if tls.skip_verify {
+            // Say so rather than ignoring the bundle in silence: a run that
+            // named a CA file and verified nothing looks like a run that
+            // verified against that file.
+            if let Some(path) = tls.ca_cert {
+                read_ca_bundle(path)?;
+                crate::write_error!(
+                    "--skip-cert-verify overrides --ca-cert: {} is not used\n",
+                    path.display()
+                );
+            }
             return Ok(
                 rustls::ClientConfig::builder_with_provider(provider.clone())
                     .with_safe_default_protocol_versions()?
@@ -120,16 +147,8 @@ mod imp {
         match tls.ca_cert {
             // `--ca-cert` replaces the system trust store, as it does in the Go version.
             Some(path) => {
-                use rustls_pki_types::pem::PemObject as _;
-
-                let pem = std::fs::read(path).with_context(|| {
-                    format!("cannot read CA certificate bundle {}", path.display())
-                })?;
-                for cert in rustls_pki_types::CertificateDer::pem_slice_iter(&pem) {
-                    roots.add(cert?)?;
-                }
-                if roots.is_empty() {
-                    bail!("no certificates found in {}", path.display());
+                for cert in read_ca_bundle(path)? {
+                    roots.add(cert)?;
                 }
             }
             None => {
