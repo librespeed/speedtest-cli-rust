@@ -105,14 +105,20 @@ impl Server {
     }
 
     /// Checks the backend is up: the ping URL must return 200 and an empty body.
-    pub async fn is_up(&self, client: &HttpClient, tlog: &TelemetryLog) -> bool {
+    ///
+    /// Also reports what this probe's connection negotiated. The transfer
+    /// phases open further connections and a reconnect can land on a different
+    /// address, so this describes the probe, not necessarily every connection
+    /// the run went on to use; the Go client reports the same thing from the
+    /// same place.
+    pub async fn is_up(&self, client: &HttpClient, tlog: &TelemetryLog) -> ServerStatus {
         let t = Instant::now();
 
         let url = match self.get_url() {
             Ok(u) => url_join_path(&u, &self.ping_url),
             Err(e) => {
                 write_debug!("Failed when creating HTTP request: {e}\n");
-                return false;
+                return ServerStatus::default();
             }
         };
 
@@ -126,19 +132,37 @@ impl Server {
         ));
 
         match result {
-            Ok((status, body)) => {
+            Ok((status, body, facts)) => {
+                // Say what the connection settled on. On hardware without AES
+                // acceleration the cipher, not the link, is what bounds the
+                // result, and under TLS 1.3 the server picks it from the set
+                // offered, so two runs can differ several-fold for a reason
+                // the numbers alone do not show.
+                match (&facts.tls, url.scheme()) {
+                    (Some(t), _) => {
+                        write_debug!("Negotiated {} with {}\n", t.version, t.cipher)
+                    }
+                    (None, "https") => write_debug!(
+                        "Connection is encrypted, but this TLS backend does not report with what\n"
+                    ),
+                    (None, _) => write_debug!("Connection is not encrypted\n"),
+                }
+
                 if !body.is_empty() {
                     write_debug!(
                         "Failed when parsing get IP result: {}\n",
                         crate::output::sanitize(&String::from_utf8_lossy(&body))
                     );
-                    return false;
+                    return ServerStatus::default();
                 }
-                status == StatusCode::OK
+                ServerStatus {
+                    up: status == StatusCode::OK,
+                    tls: facts.tls,
+                }
             }
             Err(e) => {
                 write_debug!("Error checking for server status: {e:#}\n");
-                false
+                ServerStatus::default()
             }
         }
     }
@@ -197,12 +221,29 @@ impl Server {
         let url = url_join_path(&self.get_url()?, &self.ping_url);
         let mut pings = Vec::with_capacity(count);
 
+        // Collect every distinct peer, not just the first. The requests
+        // usually share one connection, but a reconnect can land on a
+        // different address -- a different family, even -- and reporting only
+        // the first would describe a connection the later samples did not use.
+        let mut remotes: Vec<std::net::SocketAddr> = Vec::new();
         for _ in 0..count {
             let start = Instant::now();
             // The reply is timing, not data: read it away rather than into
             // memory, as the Go client does.
-            client.get_drained(&url).await?;
+            let (_, facts) = client.get_drained(&url).await?;
             pings.push(start.elapsed().as_secs_f64() * 1000.0);
+            if let Some(peer) = facts.peer {
+                if !remotes.contains(&peer) {
+                    remotes.push(peer);
+                }
+            }
+        }
+
+        for addr in &remotes {
+            write_debug!(
+                "Pinging {addr} over TCP ({})\n",
+                if addr.is_ipv4() { "IPv4" } else { "IPv6" }
+            );
         }
 
         // Discard the first sample, which carries the handshake overhead.
@@ -532,6 +573,13 @@ fn format_rate(label: &str, use_bytes: bool, counter: &BytesCounter) -> String {
 
 /// How much of a probe response is worth keeping to quote in a diagnostic.
 const PROBE_BODY_PEEK: usize = 8 * 1024;
+
+/// Whether a backend answered its probe, and what that connection negotiated.
+#[derive(Debug, Default)]
+pub struct ServerStatus {
+    pub up: bool,
+    pub tls: Option<crate::http::TlsFacts>,
+}
 
 /// A running `--json-stream` progress ticker.
 struct ProgressTicker {

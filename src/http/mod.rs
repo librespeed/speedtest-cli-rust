@@ -19,7 +19,30 @@ use hyper_util::rt::TokioExecutor;
 use url::Url;
 
 pub use connector::{BindOptions, IpFamily};
-pub use tls::TlsSettings;
+pub use tls::{TlsFacts, TlsSettings};
+
+/// What the transport negotiated for a request, read back off its response.
+///
+/// hyper copies a connection's extras onto every response served over it, so
+/// these describe the connection the request actually used -- not a throwaway
+/// one opened afterwards to ask, which can differ in address and cipher both.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionFacts {
+    /// The address the request reached.
+    pub peer: Option<std::net::SocketAddr>,
+    /// What the TLS handshake settled on, absent over plain HTTP and on a
+    /// TLS backend that does not report it.
+    pub tls: Option<TlsFacts>,
+}
+
+impl ConnectionFacts {
+    fn of<B>(resp: &Response<B>) -> Self {
+        Self {
+            peer: resp.extensions().get::<connector::PeerAddr>().map(|p| p.0),
+            tls: resp.extensions().get::<TlsFacts>().cloned(),
+        }
+    }
+}
 
 /// Go's `http.Client` follows at most 10 redirects by default.
 const MAX_REDIRECTS: usize = 10;
@@ -290,12 +313,13 @@ impl HttpClient {
     /// For requests whose body is never read -- the latency probe fires one of
     /// these `count` times per server -- so a server cannot make the client
     /// hold what it sends.
-    pub async fn get_drained(&self, url: &Url) -> anyhow::Result<StatusCode> {
+    pub async fn get_drained(&self, url: &Url) -> anyhow::Result<(StatusCode, ConnectionFacts)> {
         let fut = async {
             let resp = self.request(Method::GET, url, &[], empty_body).await?;
             let status = resp.status();
+            let facts = ConnectionFacts::of(&resp);
             drain_body(resp.into_body()).await?;
-            Ok::<_, anyhow::Error>(status)
+            Ok::<_, anyhow::Error>((status, facts))
         };
 
         self.with_timeout(fut).await
@@ -305,12 +329,17 @@ impl HttpClient {
     ///
     /// Enough to tell an empty body from a full one and to quote what came
     /// back, without letting its size decide how much memory that costs.
-    pub async fn get_head(&self, url: &Url, limit: usize) -> anyhow::Result<(StatusCode, Bytes)> {
+    pub async fn get_head(
+        &self,
+        url: &Url,
+        limit: usize,
+    ) -> anyhow::Result<(StatusCode, Bytes, ConnectionFacts)> {
         let fut = async {
             let resp = self.request(Method::GET, url, &[], empty_body).await?;
             let status = resp.status();
+            let facts = ConnectionFacts::of(&resp);
             let body = head_of_body(resp.into_body(), limit).await?;
-            Ok::<_, anyhow::Error>((status, body))
+            Ok::<_, anyhow::Error>((status, body, facts))
         };
 
         self.with_timeout(fut).await
@@ -349,5 +378,41 @@ impl HttpClient {
         // Speed tests must measure the wire, not a decompressed stream.
         let headers = vec![(ACCEPT_ENCODING, HeaderValue::from_static("identity"))];
         self.request(method, url, &headers, mk_body).await
+    }
+}
+
+#[cfg(test)]
+mod facts_tests {
+    use super::*;
+
+    /// The facts must come off the response the request was served on, which
+    /// is how they end up describing that connection rather than another.
+    #[test]
+    fn facts_are_read_from_the_response_a_request_was_served_on() {
+        let peer: std::net::SocketAddr = "192.0.2.7:443".parse().unwrap();
+        let mut resp = Response::new(());
+        resp.extensions_mut().insert(connector::PeerAddr(peer));
+        resp.extensions_mut().insert(TlsFacts {
+            version: "TLS 1.3".into(),
+            cipher: "TLS_AES_128_GCM_SHA256".into(),
+        });
+
+        let facts = ConnectionFacts::of(&resp);
+        assert_eq!(facts.peer, Some(peer));
+        let tls = facts
+            .tls
+            .expect("the TLS pair travelled with the connection");
+        assert_eq!(tls.version, "TLS 1.3");
+        assert_eq!(tls.cipher, "TLS_AES_128_GCM_SHA256");
+    }
+
+    /// A plain HTTP response carries no TLS pair, and the report must then
+    /// leave the field out rather than invent one.
+    #[test]
+    fn a_response_without_tls_reports_none() {
+        let resp = Response::new(());
+        let facts = ConnectionFacts::of(&resp);
+        assert!(facts.tls.is_none());
+        assert!(facts.peer.is_none());
     }
 }

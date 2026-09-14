@@ -86,6 +86,25 @@ pub struct JSONReport {
     #[serde(serialize_with = "go_float")]
     pub download: f64,
     pub share: String,
+
+    /// What the connection to the server negotiated, absent over plain HTTP.
+    /// On hardware without AES acceleration the cipher, not the link, can
+    /// bound the result, and under TLS 1.3 the server picks it -- so two
+    /// otherwise identical runs can differ several-fold for a reason the
+    /// numbers alone do not show.
+    ///
+    /// Read from the backend probe, as the Go client reads it: the transfer
+    /// phases open further connections, which a server is free to negotiate
+    /// differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TLSReport>,
+}
+
+/// The negotiated TLS parameters a measurement ran over.
+#[derive(Debug, Serialize)]
+pub struct TLSReport {
+    pub version: String,
+    pub cipher: String,
 }
 
 /// The output data fields of a CSV report.

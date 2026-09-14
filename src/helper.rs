@@ -89,7 +89,8 @@ pub async fn do_speed_test(
             write_ui!("Sponsored by: {}\n", output::sanitize(&sponsor_msg));
         }
 
-        if !current_server.is_up(ctx.client, &tlog).await {
+        let status = current_server.is_up(ctx.client, &tlog).await;
+        if !status.up {
             write_ui!(
                 "Selected server {} ({}) is not responding at the moment, try again later\n",
                 output::sanitize(&current_server.name),
@@ -312,6 +313,10 @@ pub async fn do_speed_test(
                     url: current_server.server.clone(),
                 },
                 client: Client { ip_info },
+                tls: status.tls.as_ref().map(|t| report::TLSReport {
+                    version: t.version.clone(),
+                    cipher: t.cipher.clone(),
+                }),
                 bytes_sent: bytes_written,
                 bytes_received: bytes_read,
                 ping: round2(ping),

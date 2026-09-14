@@ -12,6 +12,19 @@
 
 use crate::http::connector::{BindOptions, BoundConnector};
 
+/// What a connection's TLS handshake settled on.
+///
+/// Carried into the report as well as logged: on hardware without AES
+/// acceleration the cipher, not the link, can bound the result, and under TLS
+/// 1.3 the server picks it from the set the client offers. Two otherwise
+/// identical runs can therefore differ several-fold for a reason the numbers
+/// alone do not show.
+#[derive(Clone, Debug)]
+pub struct TlsFacts {
+    pub version: String,
+    pub cipher: String,
+}
+
 /// TLS trust configuration.
 pub struct TlsSettings<'a> {
     /// PEM bundle replacing the system trust store (`--ca-cert`).
@@ -51,7 +64,141 @@ mod imp {
 
     use super::{BindOptions, BoundConnector, TlsSettings};
 
-    pub type Connector = hyper_rustls::HttpsConnector<BoundConnector>;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use hyper_util::client::legacy::connect::{Connected, Connection};
+
+    use super::TlsFacts;
+    use crate::http::connector::TrackedStream;
+
+    type Inner = hyper_rustls::HttpsConnector<BoundConnector>;
+    type InnerStream = hyper_rustls::MaybeHttpsStream<TrackedStream>;
+
+    pub type Connector = ReportingConnector;
+
+    /// Names a protocol version the way Go's `tls.VersionName` does, so the two
+    /// clients report the same string for the same connection.
+    fn version_name(v: rustls::ProtocolVersion) -> String {
+        match v {
+            rustls::ProtocolVersion::TLSv1_3 => "TLS 1.3".to_string(),
+            rustls::ProtocolVersion::TLSv1_2 => "TLS 1.2".to_string(),
+            rustls::ProtocolVersion::TLSv1_1 => "TLS 1.1".to_string(),
+            rustls::ProtocolVersion::TLSv1_0 => "TLS 1.0".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Names a cipher suite the way Go's `tls.CipherSuiteName` does. rustls
+    /// spells the TLS 1.3 suites `TLS13_...` where the registry and Go spell
+    /// them `TLS_...`.
+    fn cipher_name(c: rustls::CipherSuite) -> String {
+        match c.as_str() {
+            Some(name) => match name.strip_prefix("TLS13_") {
+                Some(rest) => format!("TLS_{rest}"),
+                None => name.to_string(),
+            },
+            None => format!("{c:?}"),
+        }
+    }
+
+    fn facts(stream: &InnerStream) -> Option<TlsFacts> {
+        let InnerStream::Https(io) = stream else {
+            return None;
+        };
+        let (_, session) = io.inner().get_ref();
+        Some(TlsFacts {
+            version: version_name(session.protocol_version()?),
+            cipher: cipher_name(session.negotiated_cipher_suite()?.suite()),
+        })
+    }
+
+    /// Wraps the TLS connector so a connection's negotiated parameters travel
+    /// with it. hyper copies a connection's extras onto the response, which is
+    /// the only way to learn them for the connection a request actually used
+    /// rather than for a throwaway one opened to ask.
+    #[derive(Clone)]
+    pub struct ReportingConnector(Inner);
+
+    /// A connected stream that carries what its handshake settled on.
+    pub struct ReportingStream {
+        inner: InnerStream,
+        facts: Option<TlsFacts>,
+    }
+
+    impl Connection for ReportingStream {
+        fn connected(&self) -> Connected {
+            let c = self.inner.connected();
+            match &self.facts {
+                Some(f) => c.extra(f.clone()),
+                None => c,
+            }
+        }
+    }
+
+    impl hyper::rt::Read for ReportingStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl hyper::rt::Write for ReportingStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            self.inner.is_write_vectored()
+        }
+
+        fn poll_write_vectored(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            bufs: &[std::io::IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+        }
+    }
+
+    impl tower_service::Service<http::Uri> for ReportingConnector {
+        type Response = ReportingStream;
+        type Error = <Inner as tower_service::Service<http::Uri>>::Error;
+        type Future =
+            Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            tower_service::Service::poll_ready(&mut self.0, cx)
+        }
+
+        fn call(&mut self, dst: http::Uri) -> Self::Future {
+            let fut = tower_service::Service::call(&mut self.0, dst);
+            Box::pin(async move {
+                let inner = fut.await?;
+                let facts = facts(&inner);
+                Ok(ReportingStream { inner, facts })
+            })
+        }
+    }
 
     /// Certificate verifier that accepts everything, for `--skip-cert-verify`.
     #[derive(Debug)]
@@ -175,7 +322,7 @@ mod imp {
             .https_or_http();
 
         // ALPN decides the protocol, so h2 is only reachable when offered here.
-        Ok(if tls.http2 {
+        Ok(ReportingConnector(if tls.http2 {
             builder
                 .enable_all_versions()
                 .wrap_connector(BoundConnector::new(bind))
@@ -183,7 +330,7 @@ mod imp {
             builder
                 .enable_http1()
                 .wrap_connector(BoundConnector::new(bind))
-        })
+        }))
     }
 }
 
@@ -194,6 +341,12 @@ mod imp {
     use super::{split_pem, BindOptions, BoundConnector, TlsSettings};
 
     pub type Connector = hyper_tls::HttpsConnector<BoundConnector>;
+
+    // No TlsFacts are produced here: native-tls exposes the negotiated ALPN
+    // protocol and the peer certificate, but neither the protocol version nor
+    // the cipher suite, and it does not hand out the underlying OpenSSL
+    // session to ask directly. A run over this backend therefore reports
+    // whether the connection was encrypted, but not with what.
 
     pub fn build(bind: BindOptions, tls: &TlsSettings<'_>) -> anyhow::Result<Connector> {
         let mut builder = native_tls::TlsConnector::builder();
