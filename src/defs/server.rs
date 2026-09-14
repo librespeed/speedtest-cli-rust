@@ -20,7 +20,7 @@ use crate::defs::GetIPResult;
 use crate::http::{empty_body, HttpClient, IpFamily};
 use crate::ping::{compute_jitter, icmp_rtts, resolve_host};
 use crate::spinner::Spinner;
-use crate::util::{avg, stddev, url_join_path};
+use crate::util::{avg, go_duration, stddev, url_join_path};
 use crate::{write_debug, write_ui};
 
 /// The stagger between starting concurrent transfer streams.
@@ -709,28 +709,6 @@ impl Body for UploadBody {
     }
 }
 
-/// Renders a duration the way Go's `time.Duration.String()` does, for telemetry logs.
-fn go_duration(d: Duration) -> String {
-    fn trim(s: String) -> String {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    }
-
-    let secs = d.as_secs_f64();
-    if secs >= 1.0 {
-        format!("{}s", trim(format!("{secs:.9}")))
-    } else if secs >= 1e-3 {
-        format!("{}ms", trim(format!("{:.6}", secs * 1e3)))
-    } else if secs >= 1e-6 {
-        format!("{}µs", trim(format!("{:.3}", secs * 1e6)))
-    } else {
-        format!("{}ns", d.as_nanos())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,12 +736,6 @@ mod tests {
     #[test]
     fn sponsor_is_empty_without_a_name() {
         assert_eq!(Server::default().sponsor(), "");
-    }
-
-    #[test]
-    fn go_duration_formats_like_go() {
-        assert_eq!(go_duration(Duration::from_millis(1500)), "1.5s");
-        assert_eq!(go_duration(Duration::from_micros(1500)), "1.5ms");
     }
 }
 

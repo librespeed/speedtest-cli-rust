@@ -1,5 +1,7 @@
 //! Small helpers shared across modules.
 
+use std::time::Duration;
+
 use url::Url;
 
 /// Port of Go's `path.Clean`.
@@ -92,6 +94,29 @@ pub fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Renders a duration the way Go's `time.Duration.String()` does, for the
+/// telemetry log and the --debug phase timings.
+pub fn go_duration(d: Duration) -> String {
+    fn trim(s: String) -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    }
+
+    let secs = d.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{}s", trim(format!("{secs:.9}")))
+    } else if secs >= 1e-3 {
+        format!("{}ms", trim(format!("{:.6}", secs * 1e3)))
+    } else if secs >= 1e-6 {
+        format!("{}µs", trim(format!("{:.3}", secs * 1e6)))
+    } else {
+        format!("{}ns", d.as_nanos())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +172,11 @@ mod tests {
     fn round2_matches_go() {
         assert_eq!(round2(199.804), 199.8);
         assert_eq!(round2(5.455), 5.46);
+    }
+
+    #[test]
+    fn go_duration_formats_like_go() {
+        assert_eq!(go_duration(Duration::from_millis(1500)), "1.5s");
+        assert_eq!(go_duration(Duration::from_micros(1500)), "1.5ms");
     }
 }
