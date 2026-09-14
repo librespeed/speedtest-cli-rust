@@ -19,6 +19,12 @@ pub struct BytesCounter {
     upload_size: usize,
 }
 
+impl crate::http::connector::ByteSink for BytesCounter {
+    fn add_written(&self, n: u64) {
+        self.add(n);
+    }
+}
+
 impl BytesCounter {
     pub fn new() -> Self {
         Self {

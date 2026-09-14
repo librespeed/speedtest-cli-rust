@@ -432,17 +432,18 @@ impl Server {
 
         let url = url_join_path(&self.get_url()?, &self.upload_url);
 
+        // Count what the kernel takes, not what hyper asks for. hyper reads
+        // several hundred kilobytes ahead per connection to fill its write
+        // queue, and the end of the window throws that away again -- after it
+        // had already been added to the total. On a slow uplink the queue is a
+        // large share of everything the test moved.
         counter.start();
+        client.write_meter().install(counter.clone());
         let spinner = self.start_transfer_spinner("Uploading...  ", opts, &counter);
 
         let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
-            tasks.spawn(upload_once(
-                client.clone(),
-                url.clone(),
-                counter.clone(),
-                payload.clone(),
-            ));
+            tasks.spawn(upload_once(client.clone(), url.clone(), payload.clone()));
             tokio::time::sleep(RAMP_UP_DELAY).await;
         }
 
@@ -459,12 +460,7 @@ impl Server {
                 _ = tokio::time::sleep_until(deadline) => break,
                 Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                     if matches!(res, Ok(end) if end.replaceable()) {
-                        tasks.spawn(upload_once(
-                            client.clone(),
-                            url.clone(),
-                            counter.clone(),
-                            payload.clone(),
-                        ));
+                        tasks.spawn(upload_once(client.clone(), url.clone(), payload.clone()));
                     }
                 }
             }
@@ -472,6 +468,7 @@ impl Server {
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
+        client.write_meter().clear();
         if let Some(ticker) = ticker {
             ticker.stop().await;
         }
@@ -651,19 +648,14 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
         .unwrap_or(StreamEnd::TransferFailed)
 }
 
-/// Uploads once, counting every byte sent.
-async fn upload_once(
-    client: HttpClient,
-    url: Url,
-    counter: Arc<BytesCounter>,
-    payload: Option<Bytes>,
-) -> StreamEnd {
+/// Uploads once. The bytes are counted by the client's write meter, on the
+/// socket.
+async fn upload_once(client: HttpClient, url: Url, payload: Option<Bytes>) -> StreamEnd {
     let fut = async {
         let mk_body = || {
             BodyExt::boxed(UploadBody {
                 payload: payload.clone(),
                 pos: 0,
-                counter: counter.clone(),
             })
         };
 
@@ -713,7 +705,6 @@ async fn within_timeout<T>(
 struct UploadBody {
     payload: Option<Bytes>,
     pos: usize,
-    counter: Arc<BytesCounter>,
 }
 
 impl Body for UploadBody {
@@ -752,7 +743,6 @@ impl Body for UploadBody {
             None => Bytes::from(random_data(UPLOAD_CHUNK)),
         };
 
-        this.counter.add(chunk.len() as u64);
         Poll::Ready(Some(Ok(Frame::data(chunk))))
     }
 }
@@ -843,7 +833,7 @@ mod transfer_tests {
         assert_eq!(counter.total(), 4, "the whole response must be counted");
 
         let payload = Some(Bytes::from_static(&[0; 1024]));
-        let end = upload_once(client, url, counter, payload).await;
+        let end = upload_once(client, url, payload).await;
         assert!(
             matches!(end, StreamEnd::Completed),
             "the upload stream was cut short"
@@ -948,6 +938,55 @@ mod transfer_tests {
             started.elapsed() >= window,
             "phase ended after {:?}, before its {window:?} window",
             started.elapsed()
+        );
+    }
+
+    /// Reads everything sent to it and never answers, so an upload stream
+    /// finishes sending and then sits idle. Returns the address and a receiver
+    /// for the number of bytes read, sent once the client closes the connection.
+    async fn silent_server() -> (std::net::SocketAddr, tokio::sync::oneshot::Receiver<u64>) {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (report, arrived) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut total = 0u64;
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = stream.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                total += n as u64;
+            }
+            let _ = report.send(total);
+        });
+        (addr, arrived)
+    }
+
+    /// The upload total is counted where the socket takes the bytes, so it is
+    /// exactly what went over the connection, request head included. Counting
+    /// in the body instead also took in data hyper had queued but not yet sent.
+    #[tokio::test]
+    async fn the_upload_total_is_what_went_over_the_socket() {
+        let (addr, arrived) = silent_server().await;
+        let mut opts = opts(Duration::from_secs(1));
+        opts.requests = 1;
+
+        let (_, counted) = server_at(addr)
+            .upload(&client(), &TelemetryLog::new(), &opts)
+            .await
+            .expect("an unanswered upload is still a completed measurement");
+        let arrived = tokio::time::timeout(Duration::from_secs(10), arrived)
+            .await
+            .expect("the client closed its connection")
+            .unwrap();
+
+        assert!(counted > 0, "nothing was counted");
+        assert_eq!(
+            counted, arrived,
+            "the upload total is not what went over the socket"
         );
     }
 }

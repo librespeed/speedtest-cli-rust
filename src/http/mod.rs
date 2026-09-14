@@ -18,7 +18,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use url::Url;
 
-pub use connector::{BindOptions, IpFamily};
+pub use connector::{BindOptions, ByteSink, IpFamily, WriteMeter};
 pub use tls::{TlsFacts, TlsSettings};
 
 /// What the transport negotiated for a request, read back off its response.
@@ -146,6 +146,7 @@ pub struct HttpClient {
     inner: Client<tls::Connector, ReqBody>,
     timeout: Duration,
     user_agent: HeaderValue,
+    write_meter: WriteMeter,
 }
 
 impl HttpClient {
@@ -156,7 +157,8 @@ impl HttpClient {
         concurrent: usize,
         user_agent: &str,
     ) -> anyhow::Result<Self> {
-        let https = tls::build(bind, tls_settings)?;
+        let write_meter = WriteMeter::default();
+        let https = tls::build(bind, write_meter.clone(), tls_settings)?;
 
         // Keep enough connections alive for every concurrent stream, matching the
         // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
@@ -175,7 +177,13 @@ impl HttpClient {
             inner,
             timeout,
             user_agent: HeaderValue::from_str(user_agent)?,
+            write_meter,
         })
+    }
+
+    /// The counter socket writes are reported to, for the upload test.
+    pub fn write_meter(&self) -> &WriteMeter {
+        &self.write_meter
     }
 
     /// The configured per-request timeout (`--timeout`).

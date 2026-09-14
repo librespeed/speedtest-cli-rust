@@ -9,6 +9,7 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -316,11 +317,56 @@ async fn dial(addrs: Vec<SocketAddr>, opts: BindOptions) -> io::Result<TcpStream
 #[derive(Clone, Debug)]
 pub struct BoundConnector {
     opts: BindOptions,
+    meter: WriteMeter,
 }
 
 impl BoundConnector {
-    pub fn new(opts: BindOptions) -> Self {
-        Self { opts }
+    pub fn new(opts: BindOptions, meter: WriteMeter) -> Self {
+        Self { opts, meter }
+    }
+}
+
+/// Something socket writes are reported to.
+pub trait ByteSink: Send + Sync + std::fmt::Debug {
+    fn add_written(&self, n: u64);
+}
+
+/// The counter that socket writes are added to, while one is installed.
+///
+/// The upload figure has to be measured where the kernel takes the bytes, not
+/// where hyper asks the body for them: hyper reads ahead to fill its write
+/// queue, several hundred kilobytes per connection, and the end of the test
+/// discards whatever is still queued after it has already been counted. On a
+/// slow uplink that queue is a large fraction of everything the test moved.
+///
+/// What this counts is bytes the kernel accepted, not bytes the peer
+/// acknowledged: a socket buffer's worth can still be in flight when the
+/// window closes, and over HTTPS these are ciphertext, so TLS record overhead
+/// and request heads are included. That is the same thing the Go client's
+/// TeeReader counts, and it is what client-side throughput means; a figure
+/// bounded by acknowledgements would need the peer to report back.
+///
+/// A connection outlives any one phase and is shared through hyper's pool, so
+/// the counter cannot be captured when the connection is made; it is installed
+/// for the duration of the upload phase and taken away afterwards.
+#[derive(Clone, Default, Debug)]
+pub struct WriteMeter(Arc<Mutex<Option<Arc<dyn ByteSink>>>>);
+
+impl WriteMeter {
+    /// Starts counting socket writes into `sink`.
+    pub fn install(&self, sink: Arc<dyn ByteSink>) {
+        *self.0.lock().unwrap() = Some(sink);
+    }
+
+    /// Stops counting.
+    pub fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    fn add(&self, n: usize) {
+        if let Some(sink) = self.0.lock().unwrap().as_ref() {
+            sink.add_written(n as u64);
+        }
     }
 }
 
@@ -338,6 +384,7 @@ pub struct PeerAddr(pub SocketAddr);
 pub struct TrackedStream {
     inner: TokioIo<TcpStream>,
     peer: SocketAddr,
+    meter: WriteMeter,
 }
 
 impl Connection for TrackedStream {
@@ -362,7 +409,11 @@ impl hyper::rt::Write for TrackedStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let written = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if let Poll::Ready(Ok(n)) = &written {
+            self.meter.add(*n);
+        }
+        written
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -382,7 +433,11 @@ impl hyper::rt::Write for TrackedStream {
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+        let written = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(n)) = &written {
+            self.meter.add(*n);
+        }
+        written
     }
 }
 
@@ -397,6 +452,7 @@ impl tower_service::Service<Uri> for BoundConnector {
 
     fn call(&mut self, dst: Uri) -> Self::Future {
         let opts = self.opts.clone();
+        let meter = self.meter.clone();
         Box::pin(async move {
             let host = dst
                 .host()
@@ -415,6 +471,7 @@ impl tower_service::Service<Uri> for BoundConnector {
             Ok(TrackedStream {
                 inner: TokioIo::new(stream),
                 peer,
+                meter,
             })
         })
     }
@@ -472,6 +529,35 @@ mod tests {
         assert!(
             elapsed < budget + Duration::from_secs(1),
             "took {elapsed:?} for a {budget:?} budget, so each address took its own"
+        );
+    }
+
+    /// Socket writes are only counted while a phase has installed a counter,
+    /// so the ping and download phases cannot leak into the upload total.
+    #[test]
+    fn the_write_meter_counts_only_while_installed() {
+        #[derive(Debug, Default)]
+        struct Sink(Mutex<u64>);
+        impl ByteSink for Sink {
+            fn add_written(&self, n: u64) {
+                *self.0.lock().unwrap() += n;
+            }
+        }
+
+        let meter = WriteMeter::default();
+        meter.add(100);
+
+        let sink = Arc::new(Sink::default());
+        meter.install(sink.clone());
+        meter.add(64);
+        meter.add(36);
+        meter.clear();
+        meter.add(1000);
+
+        assert_eq!(
+            *sink.0.lock().unwrap(),
+            100,
+            "only the installed window counts"
         );
     }
 
