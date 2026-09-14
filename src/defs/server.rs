@@ -319,27 +319,34 @@ impl Server {
         counter.start();
         let spinner = self.start_transfer_spinner("Downloading...  ", opts, &counter);
 
-        let mut tasks: JoinSet<bool> = JoinSet::new();
+        let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
             tasks.spawn(download_once(client.clone(), url.clone(), counter.clone()));
             tokio::time::sleep(RAMP_UP_DELAY).await;
         }
 
-        // Replace each stream as it finishes until the test duration elapses.
-        // Dropping the JoinSet afterwards aborts everything still in flight.
-        let refill = async {
-            while let Some(res) = tasks.join_next().await {
-                if matches!(res, Ok(true)) {
-                    tasks.spawn(download_once(client.clone(), url.clone(), counter.clone()));
-                }
-            }
-        };
-        // One clock for the whole test window: the timeout and the ticker's
+        // One clock for the whole test window: the deadline and the ticker's
         // elapsed time both measure from here, after ramp-up. A ticker that
         // started earlier would run ahead of the test itself.
         let test_start = Instant::now();
         let ticker = Self::start_progress_ticker("download", &counter, opts.duration, test_start);
-        let _ = tokio::time::timeout(opts.duration, refill).await;
+        // Only the deadline ends the phase. Draining the set used to end it
+        // too, so a link that broke every connection finished the test in
+        // under a second and divided its bytes by that, reporting a rate many
+        // times too high; --duration was also silently cut to --timeout.
+        // Dropping the JoinSet afterwards aborts everything still in flight.
+        let deadline = tokio::time::Instant::now() + opts.duration;
+        loop {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => break,
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    if matches!(res, Ok(end) if end.replaceable()) {
+                        tasks.spawn(download_once(client.clone(), url.clone(), counter.clone()));
+                    }
+                }
+            }
+        }
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
@@ -387,7 +394,7 @@ impl Server {
         counter.start();
         let spinner = self.start_transfer_spinner("Uploading...  ", opts, &counter);
 
-        let mut tasks: JoinSet<bool> = JoinSet::new();
+        let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
             tasks.spawn(upload_once(
                 client.clone(),
@@ -398,24 +405,29 @@ impl Server {
             tokio::time::sleep(RAMP_UP_DELAY).await;
         }
 
-        let refill = async {
-            while let Some(res) = tasks.join_next().await {
-                if matches!(res, Ok(true)) {
-                    tasks.spawn(upload_once(
-                        client.clone(),
-                        url.clone(),
-                        counter.clone(),
-                        payload.clone(),
-                    ));
-                }
-            }
-        };
-        // One clock for the whole test window: the timeout and the ticker's
+        // One clock for the whole test window: the deadline and the ticker's
         // elapsed time both measure from here, after ramp-up. A ticker that
         // started earlier would run ahead of the test itself.
         let test_start = Instant::now();
         let ticker = Self::start_progress_ticker("upload", &counter, opts.duration, test_start);
-        let _ = tokio::time::timeout(opts.duration, refill).await;
+        // Only the deadline ends the phase; see the download loop.
+        let deadline = tokio::time::Instant::now() + opts.duration;
+        loop {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => break,
+                Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                    if matches!(res, Ok(end) if end.replaceable()) {
+                        tasks.spawn(upload_once(
+                            client.clone(),
+                            url.clone(),
+                            counter.clone(),
+                            payload.clone(),
+                        ));
+                    }
+                }
+            }
+        }
         // Abort the in-flight transfers and wait for them to unwind before
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
@@ -498,14 +510,34 @@ fn format_rate(label: &str, use_bytes: bool, counter: &BytesCounter) -> String {
 /// How much of a probe response is worth keeping to quote in a diagnostic.
 const PROBE_BODY_PEEK: usize = 8 * 1024;
 
-/// Downloads once, counting every byte received. Returns whether it completed.
-async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>) -> bool {
+/// Why a transfer stream ended, which decides whether it is replaced.
+///
+/// A stream that carried data and then broke is replaced, so the phase keeps
+/// the link busy for the whole window; one whose request never got off the
+/// ground is not, because retrying it as fast as it fails would spin. This
+/// mirrors the Go client, which respawns after a body error but declines to
+/// after a failed request.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamEnd {
+    Completed,
+    TransferFailed,
+    RequestFailed,
+}
+
+impl StreamEnd {
+    fn replaceable(self) -> bool {
+        !matches!(self, StreamEnd::RequestFailed)
+    }
+}
+
+/// Downloads once, counting every byte received.
+async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>) -> StreamEnd {
     let fut = async {
         let resp = match client.send_streaming(Method::GET, &url, empty_body).await {
             Ok(r) => r,
             Err(e) => {
                 write_debug!("Failed when making HTTP request: {e}\n");
-                return false;
+                return StreamEnd::RequestFailed;
             }
         };
 
@@ -519,23 +551,27 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
                 }
                 Err(e) => {
                     write_debug!("Failed when reading HTTP response: {e}\n");
-                    return false;
+                    return StreamEnd::TransferFailed;
                 }
             }
         }
-        true
+        StreamEnd::Completed
     };
 
-    within_timeout(&client, fut).await.unwrap_or(false)
+    // A stream cut short by our own timeout carried data and is replaced, the
+    // same way the Go client treats a body read killed by its client timeout.
+    within_timeout(&client, fut)
+        .await
+        .unwrap_or(StreamEnd::TransferFailed)
 }
 
-/// Uploads once, counting every byte sent. Returns whether it completed.
+/// Uploads once, counting every byte sent.
 async fn upload_once(
     client: HttpClient,
     url: Url,
     counter: Arc<BytesCounter>,
     payload: Option<Bytes>,
-) -> bool {
+) -> StreamEnd {
     let fut = async {
         let mk_body = || {
             BodyExt::boxed(UploadBody {
@@ -549,7 +585,7 @@ async fn upload_once(
             Ok(r) => r,
             Err(e) => {
                 write_debug!("Failed when making HTTP request: {e}\n");
-                return false;
+                return StreamEnd::RequestFailed;
             }
         };
 
@@ -560,13 +596,15 @@ async fn upload_once(
         while let Some(frame) = body.frame().await {
             if let Err(e) = frame {
                 write_debug!("Failed when reading HTTP response: {e}\n");
-                return false;
+                return StreamEnd::TransferFailed;
             }
         }
-        true
+        StreamEnd::Completed
     };
 
-    within_timeout(&client, fut).await.unwrap_or(false)
+    within_timeout(&client, fut)
+        .await
+        .unwrap_or(StreamEnd::TransferFailed)
 }
 
 /// Runs a transfer stream under `--timeout`, or without one when it is zero,
@@ -739,12 +777,119 @@ mod transfer_tests {
         .unwrap();
 
         let counter = Arc::new(BytesCounter::new());
-        let completed = download_once(client.clone(), url.clone(), counter.clone()).await;
-        assert!(completed, "the download stream was cut short");
+        let end = download_once(client.clone(), url.clone(), counter.clone()).await;
+        assert!(
+            matches!(end, StreamEnd::Completed),
+            "the download stream was cut short"
+        );
         assert_eq!(counter.total(), 4, "the whole response must be counted");
 
         let payload = Some(Bytes::from_static(&[0; 1024]));
-        let completed = upload_once(client, url, counter, payload).await;
-        assert!(completed, "the upload stream was cut short");
+        let end = upload_once(client, url, counter, payload).await;
+        assert!(
+            matches!(end, StreamEnd::Completed),
+            "the upload stream was cut short"
+        );
+    }
+
+    fn client() -> HttpClient {
+        HttpClient::new(
+            BindOptions::default(),
+            &TlsSettings {
+                ca_cert: None,
+                skip_verify: false,
+                http2: false,
+            },
+            Duration::from_secs(5),
+            3,
+            "test",
+        )
+        .unwrap()
+    }
+
+    fn opts(duration: Duration) -> TransferOptions {
+        TransferOptions {
+            silent: true,
+            use_bytes: false,
+            use_mebi: false,
+            requests: 3,
+            chunks: 1,
+            upload_size: 1,
+            no_prealloc: false,
+            duration,
+        }
+    }
+
+    /// Accepts every connection and drops it at once, so every stream fails
+    /// immediately. Returns the address it listens on.
+    async fn hostile_server() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => drop(stream),
+                    Err(_) => return,
+                }
+            }
+        });
+        addr
+    }
+
+    fn server_at(addr: std::net::SocketAddr) -> Server {
+        Server {
+            server: format!("http://{addr}/"),
+            download_url: "garbage.php".into(),
+            upload_url: "empty.php".into(),
+            ping_url: "empty.php".into(),
+            ..Default::default()
+        }
+    }
+
+    /// A phase must run for its whole window even when every stream dies at
+    /// once. It used to end when the pool drained, so a link that broke every
+    /// connection finished in milliseconds and divided its bytes by that.
+    #[tokio::test]
+    async fn a_download_phase_lasts_its_full_duration_even_if_every_stream_fails() {
+        let addr = hostile_server().await;
+        let server = server_at(addr);
+        let window = Duration::from_secs(2);
+
+        let started = Instant::now();
+        let (mbps, total) = server
+            .download(&client(), &TelemetryLog::new(), &opts(window))
+            .await
+            .expect("a failing link is still a completed measurement");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= window,
+            "phase ended after {elapsed:?}, before its {window:?} window"
+        );
+        assert_eq!(
+            total, 0,
+            "nothing was transferred, so nothing may be counted"
+        );
+        assert_eq!(mbps, 0.0, "no bytes over a full window is zero, not a rate");
+    }
+
+    /// The same for upload, which has its own copy of the loop.
+    #[tokio::test]
+    async fn an_upload_phase_lasts_its_full_duration_even_if_every_stream_fails() {
+        let addr = hostile_server().await;
+        let server = server_at(addr);
+        let window = Duration::from_secs(2);
+
+        let started = Instant::now();
+        server
+            .upload(&client(), &TelemetryLog::new(), &opts(window))
+            .await
+            .expect("a failing link is still a completed measurement");
+
+        assert!(
+            started.elapsed() >= window,
+            "phase ended after {:?}, before its {window:?} window",
+            started.elapsed()
+        );
     }
 }
