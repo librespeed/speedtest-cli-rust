@@ -1,14 +1,11 @@
 //! A speed test server and the measurements performed against it.
 
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use bytes::Bytes;
 use http::{Method, StatusCode};
-use http_body::{Body, Frame, SizeHint};
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -652,12 +649,7 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
 /// socket.
 async fn upload_once(client: HttpClient, url: Url, payload: Option<Bytes>) -> StreamEnd {
     let fut = async {
-        let mk_body = || {
-            BodyExt::boxed(UploadBody {
-                payload: payload.clone(),
-                pos: 0,
-            })
-        };
+        let mk_body = || BodyExt::boxed(upload_body::UploadBody::new(payload.clone()));
 
         let resp = match client.send_streaming(Method::POST, &url, mk_body).await {
             Ok(r) => r,
@@ -698,52 +690,71 @@ async fn within_timeout<T>(
     tokio::time::timeout(timeout, fut).await.ok()
 }
 
-/// The request body for the upload test.
-///
-/// With a payload it sends exactly that blob once; without one it produces
-/// random data indefinitely, until the test duration cancels the request.
-struct UploadBody {
-    payload: Option<Bytes>,
-    pos: usize,
-}
+/// The upload request body, in a module of its own so that its fields are
+/// private: `UploadBody::new` is the only way to build one.
+mod upload_body {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
-impl Body for UploadBody {
-    type Data = Bytes;
-    type Error = std::io::Error;
+    use bytes::Bytes;
+    use http_body::{Body, Frame, SizeHint};
 
-    /// Without an exact size hyper frames the POST as `Transfer-Encoding:
-    /// chunked`, and a backend whose parser reads fixed blocks rather than
-    /// chunk-decoding then waits for a block that never fills: the request
-    /// never completes and one payload is all the test ever sends. The Go
-    /// client sets Content-Length for the same reason. The endless
-    /// `--no-pre-allocate` stream has no length to declare and stays chunked.
-    fn size_hint(&self) -> SizeHint {
-        match &self.payload {
-            Some(payload) => SizeHint::with_exact((payload.len() - self.pos) as u64),
-            None => SizeHint::default(),
+    use super::UPLOAD_CHUNK;
+    use crate::defs::bytes_counter::random_data;
+
+    /// The request body for the upload test.
+    ///
+    /// With a payload it sends exactly that blob once; without one it produces
+    /// random data indefinitely, until the test duration cancels the request.
+    pub(super) struct UploadBody {
+        payload: Option<Bytes>,
+        pos: usize,
+    }
+
+    impl UploadBody {
+        pub(super) fn new(payload: Option<Bytes>) -> Self {
+            Self { payload, pos: 0 }
         }
     }
 
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let this = self.get_mut();
+    impl Body for UploadBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
 
-        let chunk = match &this.payload {
-            Some(payload) => {
-                if this.pos >= payload.len() {
-                    return Poll::Ready(None);
-                }
-                let end = (this.pos + UPLOAD_CHUNK).min(payload.len());
-                let out = payload.slice(this.pos..end);
-                this.pos = end;
-                out
+        /// Without an exact size hyper frames the POST as `Transfer-Encoding:
+        /// chunked`, and a backend whose parser reads fixed blocks rather than
+        /// chunk-decoding then waits for a block that never fills: the request
+        /// never completes and one payload is all the test ever sends. The Go
+        /// client sets Content-Length for the same reason. The endless
+        /// `--no-pre-allocate` stream has no length to declare and stays chunked.
+        fn size_hint(&self) -> SizeHint {
+            match &self.payload {
+                Some(payload) => SizeHint::with_exact((payload.len() - self.pos) as u64),
+                None => SizeHint::default(),
             }
-            None => Bytes::from(random_data(UPLOAD_CHUNK)),
-        };
+        }
 
-        Poll::Ready(Some(Ok(Frame::data(chunk))))
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let this = self.get_mut();
+
+            let chunk = match &this.payload {
+                Some(payload) => {
+                    if this.pos >= payload.len() {
+                        return Poll::Ready(None);
+                    }
+                    let end = (this.pos + UPLOAD_CHUNK).min(payload.len());
+                    let out = payload.slice(this.pos..end);
+                    this.pos = end;
+                    out
+                }
+                None => Bytes::from(random_data(UPLOAD_CHUNK)),
+            };
+
+            Poll::Ready(Some(Ok(Frame::data(chunk))))
+        }
     }
 }
 
