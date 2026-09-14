@@ -48,7 +48,10 @@ http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "ring", "rustls-native-certs"], optional = true }
-hyper-tls = { version = "0.6", optional = true }
+# alpn: without it hyper-tls compiles out its report of the negotiated
+# protocol, so hyper would write an HTTP/1.1 head onto a connection both ends
+# agreed to speak h2 on. It forwards to native-tls/alpn, already enabled.
+hyper-tls = { version = "0.6", features = ["alpn"], optional = true }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 libc = "0.2"
 native-tls = { version = "0.2", features = ["alpn"], optional = true }

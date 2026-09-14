@@ -23,7 +23,7 @@ pub struct TlsSettings<'a> {
 }
 
 /// Splits a PEM bundle into its individual certificates.
-#[cfg(feature = "native-tls")]
+#[cfg(all(feature = "native-tls", not(feature = "rustls-tls")))]
 fn split_pem(pem: &[u8]) -> Vec<Vec<u8>> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";

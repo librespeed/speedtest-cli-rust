@@ -204,6 +204,13 @@ impl HttpClient {
             let mut builder = Request::builder().method(method.clone()).uri(uri);
             builder = builder.header(USER_AGENT, self.user_agent.clone());
             for (name, value) in headers {
+                // A redirect that turned a POST into a GET leaves no body, so
+                // the headers describing one would be describing nothing. Go
+                // strips them for the same reason, and a strict server or a
+                // WAF can refuse a GET that claims a content type.
+                if method == Method::GET && name == CONTENT_TYPE {
+                    continue;
+                }
                 builder = builder.header(name.clone(), value.clone());
             }
 
