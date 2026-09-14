@@ -14,7 +14,7 @@ use crate::helper::{self, TestContext};
 use crate::http::connector::resolve;
 use crate::http::{BindOptions, HttpClient, IpFamily, TlsSettings};
 use crate::report;
-use crate::{output, write_debug, write_error, write_out, write_ui};
+use crate::{output, write_debug, write_out, write_ui};
 
 /// The default remote server JSON URL.
 const SERVER_LIST_URL: &str = "https://librespeed.org/backend-servers/servers.php";
@@ -291,8 +291,7 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
             } else {
                 "IPv4"
             };
-            write_error!("Address {src} is not a valid {want} address\n");
-            anyhow::bail!("invalid source address");
+            anyhow::bail!("Address {src} is not a valid {want} address");
         }
         write_debug!("Using {src} as source IP\n");
         return Ok(ip);
@@ -304,10 +303,7 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
             write_debug!("Using {ip} as source IP\n");
             Ok(ip)
         }
-        Err(e) => {
-            write_error!("Error parsing source IP: {e}\n");
-            Err(e.into())
-        }
+        Err(e) => Err(anyhow::Error::new(e).context("Error parsing source IP")),
     }
 }
 

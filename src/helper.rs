@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use bytes::Bytes;
 use rand::Rng;
 use url::Url;
@@ -47,10 +48,9 @@ pub async fn do_speed_test(
         let tlog = TelemetryLog::new();
         tlog.set_level(ctx.telemetry.get_level());
 
-        let url = current_server.get_url().map_err(|e| {
-            write_error!("Failed to get server URL: {e}\n");
-            e
-        })?;
+        let url = current_server
+            .get_url()
+            .context("Failed to get server URL")?;
         let hostname = url.host_str().unwrap_or_default().to_string();
 
         write_ui!(
@@ -81,10 +81,7 @@ pub async fn do_speed_test(
             .await
         {
             Ok(i) => i,
-            Err(e) => {
-                write_error!("Failed to get IP info: {e}\n");
-                return Err(e);
-            }
+            Err(e) => return Err(e.context("Failed to get IP info")),
         };
         write_ui!(
             "You're testing from: {}\n",
@@ -117,8 +114,7 @@ pub async fn do_speed_test(
                 if let Some(s) = spinner {
                     s.stop("").await;
                 }
-                write_error!("Failed to get ping and jitter: {e}\n");
-                return Err(e);
+                return Err(e.context("Failed to get ping and jitter"));
             }
         };
 
@@ -146,10 +142,7 @@ pub async fn do_speed_test(
             output::stream_event(r#"{"event":"phase","phase":"download"}"#);
             match current_server.download(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
-                Err(e) => {
-                    write_error!("Failed to get download speed: {e}\n");
-                    return Err(e);
-                }
+                Err(e) => return Err(e.context("Failed to get download speed")),
             }
         };
 
@@ -161,10 +154,7 @@ pub async fn do_speed_test(
             output::stream_event(r#"{"event":"phase","phase":"upload"}"#);
             match current_server.upload(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
-                Err(e) => {
-                    write_error!("Failed to get upload speed: {e}\n");
-                    return Err(e);
-                }
+                Err(e) => return Err(e.context("Failed to get upload speed")),
             }
         };
 
