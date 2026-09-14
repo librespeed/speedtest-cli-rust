@@ -9,7 +9,13 @@ use crate::http::IpFamily;
 
 /// Per-echo timeout. The Go version budgets `count` seconds for the whole run.
 const PING_TIMEOUT: Duration = Duration::from_secs(1);
-const PAYLOAD: [u8; 56] = [0; 56];
+/// One echo a second, the interval pro-bing gives the Go client. Firing them
+/// back to back finished the phase in under a second and made jitter -- an
+/// average over deltas between consecutive samples -- measure a different
+/// property of the link.
+const PING_INTERVAL: Duration = Duration::from_secs(1);
+/// pro-bing's payload size, so both clients put the same thing on the wire.
+const PAYLOAD: [u8; 24] = [0; 24];
 
 /// Resolves a hostname to a single address of the requested family.
 pub async fn resolve_host(host: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
@@ -54,8 +60,14 @@ pub async fn icmp_rtts(
         if Instant::now() >= deadline {
             break;
         }
+        let sent = Instant::now();
         if let Ok((_, rtt)) = pinger.ping(PingSequence(seq as u16), &PAYLOAD).await {
             rtts.push(rtt.as_secs_f64() * 1000.0);
+        }
+        // Space the echos a second apart, measured from when this one went out
+        // so a slow reply does not push the next one further away.
+        if seq + 1 < count {
+            tokio::time::sleep_until((sent + PING_INTERVAL).into()).await;
         }
     }
 
