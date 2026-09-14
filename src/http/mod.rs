@@ -79,6 +79,44 @@ async fn collect_limited(body: Incoming, limit: usize) -> anyhow::Result<Bytes> 
     Ok(out.freeze())
 }
 
+/// Reads a response body without keeping it, returning how many bytes it held.
+///
+/// Bodies the program does not read still have to be consumed for the
+/// connection to be reusable, and buffering them hands a server control of
+/// this process's memory.
+async fn drain_body(body: Incoming) -> anyhow::Result<u64> {
+    let mut body = body;
+    let mut n = 0u64;
+
+    while let Some(frame) = body.frame().await {
+        if let Some(data) = frame?.data_ref() {
+            n += data.len() as u64;
+        }
+    }
+
+    Ok(n)
+}
+
+/// Reads at most `limit` bytes of a body and discards the rest.
+///
+/// For deciding what a body *is* rather than reading it: emptiness, or the
+/// opening of an error page worth showing.
+async fn head_of_body(body: Incoming, limit: usize) -> anyhow::Result<Bytes> {
+    let mut body = body;
+    let mut out = BytesMut::new();
+
+    while let Some(frame) = body.frame().await {
+        if let Some(data) = frame?.data_ref() {
+            if out.len() < limit {
+                let take = (limit - out.len()).min(data.len());
+                out.extend_from_slice(&data[..take]);
+            }
+        }
+    }
+
+    Ok(out.freeze())
+}
+
 /// The program's HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
@@ -234,6 +272,37 @@ impl HttpClient {
             let resp = self.request(Method::GET, url, &[], empty_body).await?;
             let status = resp.status();
             let body = collect_limited(resp.into_body(), MAX_BUFFERED_RESPONSE).await?;
+            Ok::<_, anyhow::Error>((status, body))
+        };
+
+        self.with_timeout(fut).await
+    }
+
+    /// Fetches a URL and discards the body, returning the status.
+    ///
+    /// For requests whose body is never read -- the latency probe fires one of
+    /// these `count` times per server -- so a server cannot make the client
+    /// hold what it sends.
+    pub async fn get_drained(&self, url: &Url) -> anyhow::Result<StatusCode> {
+        let fut = async {
+            let resp = self.request(Method::GET, url, &[], empty_body).await?;
+            let status = resp.status();
+            drain_body(resp.into_body()).await?;
+            Ok::<_, anyhow::Error>(status)
+        };
+
+        self.with_timeout(fut).await
+    }
+
+    /// Fetches a URL, keeping only the opening of the body.
+    ///
+    /// Enough to tell an empty body from a full one and to quote what came
+    /// back, without letting its size decide how much memory that costs.
+    pub async fn get_head(&self, url: &Url, limit: usize) -> anyhow::Result<(StatusCode, Bytes)> {
+        let fut = async {
+            let resp = self.request(Method::GET, url, &[], empty_body).await?;
+            let status = resp.status();
+            let body = head_of_body(resp.into_body(), limit).await?;
             Ok::<_, anyhow::Error>((status, body))
         };
 

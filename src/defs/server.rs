@@ -116,7 +116,10 @@ impl Server {
             }
         };
 
-        let result = client.get_bytes(&url).await;
+        // Enough of the body to tell empty from not, and to quote what came
+        // back; a backend answering the probe with megabytes used to make the
+        // client hold all of them, ten servers at a time.
+        let result = client.get_head(&url, PROBE_BODY_PEEK).await;
         tlog.logf(format!(
             "Check backend is up took {}",
             go_duration(t.elapsed())
@@ -196,7 +199,9 @@ impl Server {
 
         for _ in 0..count {
             let start = Instant::now();
-            client.get_bytes(&url).await?;
+            // The reply is timing, not data: read it away rather than into
+            // memory, as the Go client does.
+            client.get_drained(&url).await?;
             pings.push(start.elapsed().as_secs_f64() * 1000.0);
         }
 
@@ -490,6 +495,9 @@ fn format_rate(label: &str, use_bytes: bool, counter: &BytesCounter) -> String {
     }
 }
 
+/// How much of a probe response is worth keeping to quote in a diagnostic.
+const PROBE_BODY_PEEK: usize = 8 * 1024;
+
 /// Downloads once, counting every byte received. Returns whether it completed.
 async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>) -> bool {
     let fut = async {
@@ -545,10 +553,15 @@ async fn upload_once(
             }
         };
 
-        // Drain the response so the connection can be reused.
-        if let Err(e) = resp.into_body().collect().await {
-            write_debug!("Failed when reading HTTP response: {e}\n");
-            return false;
+        // Discard the response frame by frame so the connection can be reused.
+        // Collecting it instead retained whatever the server chose to send, per
+        // stream, for the whole test -- the one body read here with no cap.
+        let mut body = resp.into_body();
+        while let Some(frame) = body.frame().await {
+            if let Err(e) = frame {
+                write_debug!("Failed when reading HTTP response: {e}\n");
+                return false;
+            }
         }
         true
     };
