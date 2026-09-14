@@ -351,7 +351,7 @@ impl Server {
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
         if let Some(ticker) = ticker {
-            ticker.abort();
+            ticker.stop().await;
         }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
@@ -432,7 +432,7 @@ impl Server {
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
         if let Some(ticker) = ticker {
-            ticker.abort();
+            ticker.stop().await;
         }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
@@ -450,32 +450,55 @@ impl Server {
     ///
     /// The machine-readable sibling of the spinner: the spinner narrates to a
     /// person on stderr, this reports to a script on stdout, and both read the
-    /// same counter. Aborted -- not joined -- when the transfer ends, since a
-    /// sleeping tick holds nothing worth waiting for.
+    /// same counter.
     fn start_progress_ticker(
         phase: &'static str,
         counter: &Arc<BytesCounter>,
         duration: Duration,
         started: Instant,
-    ) -> Option<tokio::task::JoinHandle<()>> {
+    ) -> Option<ProgressTicker> {
         if !crate::output::is_stream() {
             return None;
         }
         let counter = counter.clone();
-        Some(tokio::spawn(async move {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let wait_for_stop = stop.clone();
+        let handle = tokio::spawn(async move {
+            // A ticker, not a sleep loop: sleeping a second between events
+            // adds each event's own cost to the next interval, so the events
+            // drift away from the seconds they claim to report.
+            let period = Duration::from_secs(1);
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // A tick the task was too busy to take is dropped, and the next
+            // one lands on the original schedule, rather than firing a burst
+            // to catch up.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::select! {
+                    biased;
+                    _ = wait_for_stop.notified() => return,
+                    _ = ticker.tick() => {}
+                }
                 let elapsed = started.elapsed().as_secs_f64();
                 // A speed test is bounded by time, not by volume, so percent
                 // done is elapsed over the configured duration -- exact, and
-                // the only notion of "how much is left" the test has.
-                let percent = (elapsed / duration.as_secs_f64() * 100.0).min(100.0);
-                crate::output::stream_event(&format!(
-                    r#"{{"event":"progress","phase":"{phase}","seconds":{elapsed:.1},"mbps":{:.2},"progress":{percent:.0}}}"#,
-                    counter.avg_mbps()
-                ));
+                // the only notion of "how much is left" the test has. It is
+                // truncated, so the run reads 99 until the window is over.
+                let percent = (elapsed / duration.as_secs_f64() * 100.0).min(100.0) as u32;
+                let event = crate::report::ProgressEvent {
+                    event: "progress",
+                    phase,
+                    seconds: (elapsed * 10.0).round() / 10.0,
+                    mbps: (counter.avg_mbps() * 100.0).round() / 100.0,
+                    progress: percent,
+                };
+                match serde_json::to_string(&event) {
+                    Ok(line) => crate::output::stream_event(&line),
+                    Err(e) => crate::write_error!("Error generating stream event: {e}\n"),
+                }
             }
-        }))
+        });
+        Some(ProgressTicker { stop, handle })
     }
 
     fn start_transfer_spinner(
@@ -509,6 +532,21 @@ fn format_rate(label: &str, use_bytes: bool, counter: &BytesCounter) -> String {
 
 /// How much of a probe response is worth keeping to quote in a diagnostic.
 const PROBE_BODY_PEEK: usize = 8 * 1024;
+
+/// A running `--json-stream` progress ticker.
+struct ProgressTicker {
+    stop: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ProgressTicker {
+    /// Ends the ticker and waits for it, so a late progress event can never
+    /// land after the phase event that follows it.
+    async fn stop(self) {
+        self.stop.notify_one();
+        let _ = self.handle.await;
+    }
+}
 
 /// Why a transfer stream ended, which decides whether it is replaced.
 ///

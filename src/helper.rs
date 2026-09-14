@@ -212,13 +212,19 @@ pub async fn do_speed_test(
         if cli.csv {
             reps_csv.push(CSVReport {
                 timestamp: report::timestamp_now(),
-                name: current_server.name.clone(),
-                address: current_server.server.clone(),
+                // The server list is fetched from a URL the user can point
+                // anywhere, and its entries name further hosts, so these three
+                // are attacker-chosen text. The csv writer quotes a delimiter
+                // and the report defuses a leading formula trigger, but
+                // neither stops an escape sequence from driving the terminal
+                // of whoever cats the file.
+                name: output::sanitize(&current_server.name),
+                address: output::sanitize(&current_server.server),
                 ping: round2(ping),
                 jitter: round2(jitter),
                 download: round2(download_value),
                 upload: round2(upload_value),
-                share: share_link,
+                share: output::sanitize(&share_link),
                 ip: isp_info.ip(),
             });
         } else if cli.json || cli.json_stream {
@@ -257,12 +263,12 @@ pub async fn do_speed_test(
     } else if cli.json_stream {
         // The reports are the same array --json prints, wrapped as the final
         // event so a consumer needs one parser for the whole stream.
-        match serde_json::to_string(&reps_json) {
+        match serde_json::to_string(&json_reports(&reps_json)) {
             Ok(s) => output::stream_event(&format!(r#"{{"event":"result","reports":{s}}}"#)),
             Err(e) => write_error!("Error generating JSON report: {e}\n"),
         }
     } else if cli.json {
-        match serde_json::to_string(&reps_json) {
+        match serde_json::to_string(&json_reports(&reps_json)) {
             // serde_json does not terminate its output, and a document that
             // ends mid-line makes a shell prompt land on top of it and leaves
             // line-oriented tools with an unterminated last line.
@@ -272,6 +278,15 @@ pub async fn do_speed_test(
     }
 
     Ok(())
+}
+
+/// The reports as JSON sees them: `null` when nothing was measured.
+///
+/// Go declares a nil slice, which marshals to `null`, and both clients exit 0
+/// even when every server failed -- so the document is the only signal that
+/// nothing happened, and a consumer testing for null must keep seeing it.
+fn json_reports(reports: &[JSONReport]) -> Option<&[JSONReport]> {
+    (!reports.is_empty()).then_some(reports)
 }
 
 /// Sends the result to the telemetry server and returns the share link.

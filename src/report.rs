@@ -14,6 +14,25 @@ fn go_float<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
     }
 }
 
+/// One `progress` event of the `--json-stream` NDJSON stream.
+///
+/// Typed rather than formatted by hand so the numbers are rendered the way
+/// Go's `encoding/json` renders them: a whole `mbps` is `100`, not `100.00`,
+/// and a consumer decoding into an int does not trip over the difference.
+#[derive(Serialize)]
+pub struct ProgressEvent {
+    pub event: &'static str,
+    pub phase: &'static str,
+    /// Seconds since the phase's clock started, rounded to one decimal.
+    #[serde(serialize_with = "go_float")]
+    pub seconds: f64,
+    /// The rate measured so far, rounded to two decimals.
+    #[serde(serialize_with = "go_float")]
+    pub mbps: f64,
+    /// Percent of the configured duration elapsed, truncated.
+    pub progress: u32,
+}
+
 /// Serializes a CSV text field, prefixing a leading formula trigger with a
 /// single quote so spreadsheet software treats the value as text.
 ///
