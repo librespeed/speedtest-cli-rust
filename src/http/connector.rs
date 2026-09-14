@@ -18,7 +18,16 @@ use socket2::{SockRef, TcpKeepalive};
 use tokio::net::{TcpSocket, TcpStream};
 
 /// Matches the Go implementation's `net.Dialer{Timeout: 30s, KeepAlive: 30s}`.
+/// It is the budget for reaching the host, not for each address in turn.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the first address family gets to itself before the other one is
+/// tried alongside it, as in Go's `net.Dialer.FallbackDelay`.
+const FALLBACK_DELAY: Duration = Duration::from_millis(300);
+
+/// The smallest slice of the budget a single address is given, matching Go's
+/// `saneMinimum` in `dialSerial`.
+const MIN_ATTEMPT: Duration = Duration::from_secs(2);
 const KEEPALIVE: Duration = Duration::from_secs(30);
 
 /// Which IP address family connections are restricted to.
@@ -186,7 +195,11 @@ fn set_fwmark(_sock: &SockRef<'_>, _fwmark: u32) -> io::Result<()> {
 }
 
 /// Opens a single TCP connection to `addr` honouring all bind options.
-async fn connect_one(addr: SocketAddr, opts: &BindOptions) -> io::Result<TcpStream> {
+async fn connect_one(
+    addr: SocketAddr,
+    opts: &BindOptions,
+    attempt_deadline: tokio::time::Instant,
+) -> io::Result<TcpStream> {
     let socket = if addr.is_ipv4() {
         TcpSocket::new_v4()?
     } else {
@@ -208,9 +221,94 @@ async fn connect_one(addr: SocketAddr, opts: &BindOptions) -> io::Result<TcpStre
         }
     }
 
-    tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(addr))
+    tokio::time::timeout_at(attempt_deadline, socket.connect(addr))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))?
+}
+
+/// Tries each address in turn, splitting what is left of the budget between
+/// the addresses still to try, as Go's `dialSerial` does.
+async fn dial_serial(
+    addrs: Vec<SocketAddr>,
+    opts: BindOptions,
+    deadline: tokio::time::Instant,
+) -> io::Result<TcpStream> {
+    let mut last_err = None;
+    let total = addrs.len();
+
+    for (i, addr) in addrs.into_iter().enumerate() {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        // An address that hangs must not eat the whole budget and leave the
+        // others untried, but a share too small to complete a handshake is no
+        // use either.
+        let remaining = deadline - now;
+        let share = remaining / (total - i) as u32;
+        let attempt = now + share.max(MIN_ATTEMPT).min(remaining);
+
+        match connect_one(addr, &opts, attempt).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "connection timed out")))
+}
+
+/// Connects to the first address that answers, trying both families.
+///
+/// A name commonly resolves to an AAAA record first, and on a network where
+/// IPv6 resolves but blackholes -- a stale delegated prefix, filtered ICMPv6
+/// -- dialling strictly in order means the per-request timeout kills the
+/// request before any IPv4 address is reached, and the client cannot run at
+/// all. So the second family starts alongside the first after a short delay
+/// and the first connection to answer wins, as Go's `dialParallel` does.
+async fn dial(addrs: Vec<SocketAddr>, opts: BindOptions) -> io::Result<TcpStream> {
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+
+    let Some(first) = addrs.first().copied() else {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "no address to connect to",
+        ));
+    };
+    let (primary, fallback): (Vec<_>, Vec<_>) = addrs
+        .into_iter()
+        .partition(|a| a.is_ipv4() == first.is_ipv4());
+
+    if fallback.is_empty() {
+        return dial_serial(primary, opts, deadline).await;
+    }
+
+    // Dropping the set at the end of this function cancels whichever attempt
+    // did not win.
+    let mut racers: tokio::task::JoinSet<(bool, io::Result<TcpStream>)> =
+        tokio::task::JoinSet::new();
+    let fallback_opts = opts.clone();
+    racers.spawn(async move { (true, dial_serial(primary, opts, deadline).await) });
+    racers.spawn(async move {
+        tokio::time::sleep(FALLBACK_DELAY).await;
+        (false, dial_serial(fallback, fallback_opts, deadline).await)
+    });
+
+    let mut primary_err = None;
+    let mut other_err = None;
+    while let Some(joined) = racers.join_next().await {
+        match joined {
+            Ok((_, Ok(stream))) => return Ok(stream),
+            // Report the first family's failure: it is the one the resolver
+            // put first, and the one the user is most likely asking about.
+            Ok((true, Err(e))) => primary_err = Some(e),
+            Ok((false, Err(e))) => other_err = Some(e),
+            Err(e) => other_err = Some(io::Error::other(e)),
+        }
+    }
+
+    Err(primary_err.or(other_err).unwrap_or_else(|| {
+        io::Error::new(io::ErrorKind::AddrNotAvailable, "no address to connect to")
+    }))
 }
 
 /// A `tower` connector that produces socket-bound TCP streams.
@@ -246,17 +344,79 @@ impl tower_service::Service<Uri> for BoundConnector {
             });
 
             let addrs = resolve(host, port, opts.family).await?;
-
-            let mut last_err = None;
-            for addr in addrs {
-                match connect_one(addr, &opts).await {
-                    Ok(stream) => return Ok(TokioIo::new(stream)),
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            Err(last_err.unwrap_or_else(|| {
-                io::Error::new(io::ErrorKind::AddrNotAvailable, "no address to connect to")
-            }))
+            let stream = dial(addrs, opts).await?;
+            Ok(TokioIo::new(stream))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name that resolves to an unreachable address of one family and a
+    /// working address of the other must still connect, and quickly. Dialling
+    /// strictly in order left the working address untried until the first had
+    /// used up its own 30 s, by which point the per-request timeout had
+    /// already failed the request.
+    #[tokio::test]
+    async fn the_other_family_is_tried_alongside_the_first() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let working = listener.local_addr().unwrap();
+        // Reserved for documentation, so it is routed nowhere.
+        let dead: SocketAddr = "[2001:db8::1]:80".parse().unwrap();
+
+        let started = std::time::Instant::now();
+        let stream = dial(vec![dead, working], BindOptions::default())
+            .await
+            .expect("the reachable address should have been used");
+
+        assert_eq!(stream.peer_addr().unwrap(), working);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}, so the families were not raced",
+            started.elapsed()
+        );
+    }
+
+    /// The connect timeout is a budget for reaching the host, not a grant to
+    /// each address in turn. Dialling strictly in order gave every address its
+    /// own full timeout, so a name with two dead addresses took twice as long
+    /// as the budget allows.
+    #[tokio::test]
+    async fn addresses_share_one_budget_rather_than_each_getting_their_own() {
+        // Reserved for documentation, so both are routed nowhere and hang.
+        let dead: Vec<SocketAddr> = vec![
+            "192.0.2.1:80".parse().unwrap(),
+            "192.0.2.2:80".parse().unwrap(),
+        ];
+        let budget = Duration::from_secs(3);
+        let deadline = tokio::time::Instant::now() + budget;
+
+        let started = std::time::Instant::now();
+        dial_serial(dead, BindOptions::default(), deadline)
+            .await
+            .expect_err("nothing is listening on either address");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < budget + Duration::from_secs(1),
+            "took {elapsed:?} for a {budget:?} budget, so each address took its own"
+        );
+    }
+
+    /// With one family only there is nothing to race, and every address still
+    /// gets a share of the budget rather than one address taking all of it.
+    #[tokio::test]
+    async fn a_single_family_falls_through_to_the_next_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let working = listener.local_addr().unwrap();
+        // Nothing listens here: the connection is refused at once.
+        let refused: SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        let stream = dial(vec![refused, working], BindOptions::default())
+            .await
+            .expect("the second address should have been tried");
+        assert_eq!(stream.peer_addr().unwrap(), working);
     }
 }
