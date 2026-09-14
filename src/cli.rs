@@ -15,7 +15,8 @@ pub struct Cli {
     pub version: bool,
 
     /// Force IPv4 only
-    #[arg(long = "ipv4", short = '4', conflicts_with = "ipv6")]
+    // Both may be given; --ipv4 wins, the precedence the Go client applies.
+    #[arg(long = "ipv4", short = '4')]
     pub ipv4: bool,
 
     /// Force IPv6 only
@@ -36,7 +37,7 @@ pub struct Cli {
     pub no_icmp: bool,
 
     /// Concurrent HTTP requests being made
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=64))]
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
     pub concurrent: u32,
 
     /// Display values in bytes instead of bits. Does not affect
@@ -121,24 +122,25 @@ pub struct Cli {
     pub interface: Option<String>,
 
     /// HTTP TIMEOUT in seconds
-    #[arg(long, value_name = "TIMEOUT", default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    #[arg(long, value_name = "TIMEOUT", default_value_t = 15, value_parser = clap::value_parser!(u64).range(0..))]
     pub timeout: u64,
 
     /// Upload and download test duration in seconds
-    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..))]
     pub duration: u64,
 
     /// Chunks to download from server, chunk size depends on server configuration
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
     pub chunks: u32,
 
     /// Size of payload being uploaded in KiB
-    #[arg(long = "upload-size", default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+    #[arg(long = "upload-size", default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
     pub upload_size: u32,
 
     /// Use HTTPS instead of HTTP when communicating with
     /// LibreSpeed.org operated servers
-    #[arg(long, conflicts_with = "insecure")]
+    // Both may be given; --secure wins, as it does in the Go client.
+    #[arg(long)]
     pub secure: bool,
 
     /// Use HTTP instead of HTTPS when communicating with

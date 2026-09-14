@@ -518,8 +518,7 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
         true
     };
 
-    let timeout = client.timeout();
-    tokio::time::timeout(timeout, fut).await.unwrap_or(false)
+    within_timeout(&client, fut).await.unwrap_or(false)
 }
 
 /// Uploads once, counting every byte sent. Returns whether it completed.
@@ -554,8 +553,20 @@ async fn upload_once(
         true
     };
 
+    within_timeout(&client, fut).await.unwrap_or(false)
+}
+
+/// Runs a transfer stream under `--timeout`, or without one when it is zero,
+/// the same as every other request. Returns `None` if the timeout cut it short.
+async fn within_timeout<T>(
+    client: &HttpClient,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
     let timeout = client.timeout();
-    tokio::time::timeout(timeout, fut).await.unwrap_or(false)
+    if timeout.is_zero() {
+        return Some(fut.await);
+    }
+    tokio::time::timeout(timeout, fut).await.ok()
 }
 
 /// The request body for the upload test.
@@ -664,5 +675,63 @@ mod tests {
     fn go_duration_formats_like_go() {
         assert_eq!(go_duration(Duration::from_millis(1500)), "1.5s");
         assert_eq!(go_duration(Duration::from_micros(1500)), "1.5ms");
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+    use crate::http::{BindOptions, HttpClient, TlsSettings};
+
+    /// Answers every request only after `delay`, so a stream completes only if
+    /// nothing cancels it while it waits. Returns the address it listens on.
+    async fn slow_server(delay: Duration) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata")
+                        .await;
+                    // Read the request away, so closing does not reset it.
+                    let mut buf = [0u8; 8192];
+                    while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+                });
+            }
+        });
+        addr
+    }
+
+    /// --timeout 0 means no timeout, so it must not cut a transfer stream
+    /// short, however long the server takes to answer.
+    #[tokio::test]
+    async fn a_zero_timeout_does_not_cut_transfer_streams_short() {
+        let addr = slow_server(Duration::from_millis(200)).await;
+        let url = Url::parse(&format!("http://{addr}/")).unwrap();
+        let client = HttpClient::new(
+            BindOptions::default(),
+            &TlsSettings {
+                ca_cert: None,
+                skip_verify: false,
+                http2: false,
+            },
+            Duration::ZERO,
+            3,
+            "test",
+        )
+        .unwrap();
+
+        let counter = Arc::new(BytesCounter::new());
+        let completed = download_once(client.clone(), url.clone(), counter.clone()).await;
+        assert!(completed, "the download stream was cut short");
+        assert_eq!(counter.total(), 4, "the whole response must be counted");
+
+        let payload = Some(Bytes::from_static(&[0; 1024]));
+        let completed = upload_once(client, url, counter, payload).await;
+        assert!(completed, "the upload stream was cut short");
     }
 }

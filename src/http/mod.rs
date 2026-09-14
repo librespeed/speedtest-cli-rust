@@ -118,8 +118,26 @@ impl HttpClient {
     }
 
     /// The configured per-request timeout (`--timeout`).
+    ///
+    /// Zero means none, as it does in the Go client, which is what a slow link
+    /// needs when the transfer legitimately outlasts any sensible limit.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Runs a request under the configured timeout, or without one when it is
+    /// zero.
+    async fn with_timeout<T>(
+        &self,
+        fut: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        if self.timeout.is_zero() {
+            return fut.await;
+        }
+
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
     }
 
     /// Issues a request, following redirects the way Go's `http.Client` does.
@@ -219,9 +237,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, body))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Posts a body and reads the whole response, used for telemetry.
@@ -241,9 +257,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, out))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Sends a request without buffering the response body, for the transfer tests.
