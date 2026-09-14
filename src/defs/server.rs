@@ -691,7 +691,8 @@ async fn within_timeout<T>(
 }
 
 /// The upload request body, in a module of its own so that its fields are
-/// private: `UploadBody::new` is the only way to build one.
+/// private: `UploadBody::new` is the only way to build one, so every upload
+/// gets its filler decided there.
 mod upload_body {
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -709,11 +710,23 @@ mod upload_body {
     pub(super) struct UploadBody {
         payload: Option<Bytes>,
         pos: usize,
+        /// The block sent over and over when there is no pre-allocated payload,
+        /// and empty when there is one.
+        filler: Bytes,
     }
 
     impl UploadBody {
         pub(super) fn new(payload: Option<Bytes>) -> Self {
-            Self { payload, pos: 0 }
+            // Only the endless stream ever sends the filler.
+            let filler = match payload {
+                Some(_) => Bytes::new(),
+                None => Bytes::from(random_data(UPLOAD_CHUNK)),
+            };
+            Self {
+                payload,
+                pos: 0,
+                filler,
+            }
         }
     }
 
@@ -750,10 +763,32 @@ mod upload_body {
                     this.pos = end;
                     out
                 }
-                None => Bytes::from(random_data(UPLOAD_CHUNK)),
+                // One block per request, resliced, rather than a fresh one per
+                // frame. The point of --no-pre-allocate is not to hold the whole
+                // payload, which 64 KiB does not; generating it again for every
+                // frame cost about seventeen times the CPU of the pre-allocated
+                // path and saved no memory at all.
+                None => this.filler.clone(),
             };
 
             Poll::Ready(Some(Ok(Frame::data(chunk))))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The filler is only ever sent without a pre-allocated payload, so a
+        /// body that has one must not generate it.
+        #[test]
+        fn only_a_body_without_a_payload_generates_filler() {
+            let with_payload = UploadBody::new(Some(Bytes::from_static(b"payload")));
+            assert!(
+                with_payload.filler.is_empty(),
+                "filler was generated for a pre-allocated payload"
+            );
+            assert_eq!(UploadBody::new(None).filler.len(), UPLOAD_CHUNK);
         }
     }
 }

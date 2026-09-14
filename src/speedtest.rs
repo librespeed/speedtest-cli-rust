@@ -325,7 +325,7 @@ async fn load_servers(
             if buf.len() as u64 > MAX_LOCAL_JSON {
                 anyhow::bail!("server list from stdin exceeds {MAX_LOCAL_JSON} bytes");
             }
-            buf
+            bytes::Bytes::from(buf)
         }
         Some(path) => {
             write_ui!("Using local JSON server list: {path}\n");
@@ -337,7 +337,7 @@ async fn load_servers(
             if buf.len() as u64 > MAX_LOCAL_JSON {
                 anyhow::bail!("{path} exceeds {MAX_LOCAL_JSON} bytes");
             }
-            buf
+            bytes::Bytes::from(buf)
         }
         None => {
             let server_url = cli.server_json.as_deref().unwrap_or(SERVER_LIST_URL);
@@ -374,13 +374,15 @@ async fn load_servers(
     preprocess_servers(servers, force_scheme, &cli.exclude, &cli.server, filter)
 }
 
-async fn fetch_server_list(client: &HttpClient, url: &str) -> anyhow::Result<Vec<u8>> {
+async fn fetch_server_list(client: &HttpClient, url: &str) -> anyhow::Result<bytes::Bytes> {
     let url = url::Url::parse(url).with_context(|| format!("invalid server list URL: {url}"))?;
     let (status, body) = client.get_bytes(&url).await?;
     if !status.is_success() {
         anyhow::bail!("server list request returned HTTP {status}");
     }
-    Ok(body.to_vec())
+    // Handed on as it came off the wire: serde parses from the borrowed
+    // bytes, so a hostile list does not get to be held twice.
+    Ok(body)
 }
 
 /// Rewrites a server URL's scheme, as Go's `url.URL.Scheme` assignment does.
