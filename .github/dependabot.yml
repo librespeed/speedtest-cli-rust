@@ -33,6 +33,11 @@ updates:
       day: monday
     commit-message:
       prefix: "ci"
+    ignore:
+      # Its refs are Rust versions, not versions of the action, so a bump
+      # here once offered a Rust that does not exist. Pinned by commit and
+      # updated by hand; the compiler itself is named in `with:`.
+      - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
         patterns:

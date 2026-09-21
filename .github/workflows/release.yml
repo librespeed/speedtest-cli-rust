@@ -6,18 +6,108 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build a release for
+        description: Tag whose binaries to rebuild; this path never publishes
         required: true
 
+# Only the job that creates the GitHub release writes anything; everything
+# else, including the job holding the registry token, only reads.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # The compiler a release is built with: the current stable when this
+  # pipeline landed. Named here rather than "stable", so what went into a
+  # release is a fact in the repository and moving to a newer compiler is a
+  # commit someone signs off on. CI still runs on whatever stable is today,
+  # which is what says the code has not fallen behind the compiler.
+  RELEASE_TOOLCHAIN: "1.98.1"
 
 jobs:
+  # One job decides what "this release" means, and every job after it is
+  # handed that commit rather than resolving the tag again. A tag push
+  # already names an immutable commit; a manual rebuild names a tag, which
+  # is resolved once, here.
+  resolve:
+    name: Resolve the commit
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.sha }}
+
+      - id: source
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          expected="${{ github.event_name == 'push' && github.sha || '' }}"
+          if [ -n "$expected" ] && [ "$sha" != "$expected" ]; then
+            echo "::error::checked out $sha, expected $expected"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  # A release runs the same checks a pull request does, against that commit,
+  # before anything is built or published.
+  validate:
+    name: Checks
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.resolve.outputs.source }}
+
+  # The canonical crate is assembled once, here, and this job also fixes
+  # which commit the rest of the run is about. The publish job reproduces
+  # the crate and compares the bytes before uploading anything.
+  prepare:
+    name: Package the crate
+    needs: [resolve, validate]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.guard.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source }}
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch, 2026-09-03
+        with:
+          toolchain: ${{ env.RELEASE_TOOLCHAIN }}
+
+      # A tag that disagrees with Cargo.toml stops the release here, before
+      # there are artifacts or a release to leave behind.
+      - id: guard
+        name: Check the tag against the crate version
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: .github/scripts/check-tag-version.sh "$TAG"
+
+      - id: package
+        name: Package
+        run: |
+          set -euo pipefail
+          cargo package --locked
+          cargo package --locked --list > crate-files.txt
+          crate="target/package/librespeed-cli-${{ steps.guard.outputs.version }}.crate"
+          sha256sum "$crate" | cut -d' ' -f1 > crate.sha256
+          echo "sha256=$(cat crate.sha256)" >> "$GITHUB_OUTPUT"
+          cp "$crate" .
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crate
+          path: |
+            librespeed-cli-*.crate
+            crate-files.txt
+            crate.sha256
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.target }}
+    needs: [resolve, prepare]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,14 +121,19 @@ jobs:
           # cross-built here. OpenWrt serves those targets instead: its rust
           # package builds std from source.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.source }}
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch, 2026-09-03
+        with:
+          toolchain: ${{ env.RELEASE_TOOLCHAIN }}
 
-      - run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # Pinned: --locked fixes cross's own dependencies, not which cross
+      # this installs, and cross is part of what builds the binaries.
+      - run: cargo install cross@0.2.5 --locked
 
       # OpenSSL is vendored so the published binaries are self-contained;
       # OpenWrt packages build against the SDK's libopenssl instead.
@@ -47,6 +142,7 @@ jobs:
 
       - name: Package
         run: |
+          set -euo pipefail
           name="librespeed-cli-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/librespeed-cli" "dist/$name/"
@@ -54,29 +150,131 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: librespeed-cli-${{ matrix.target }}
+          # A namespace of its own: the checks in validate run inside this
+          # same run and upload artifacts called librespeed-cli-*, which the
+          # release job must not pick up.
+          name: release-${{ matrix.target }}
           path: dist/*.tar.gz*
           if-no-files-found: error
 
   release:
     name: Publish release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.resolve.outputs.source }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # The release binaries only: the crate belongs to the publish job
+          # and the validate checks upload binaries of their own.
+          pattern: release-*
           path: dist
           merge-multiple: true
 
-      - name: Collect checksums
-        run: cat dist/*.sha256 > dist/SHA256SUMS && rm -f dist/*.sha256
+      # The binaries were built from the commit resolve pinned. If the tag
+      # has been moved since, a release cut here would carry them under a
+      # tag that now names something else. This holds for a manual rebuild
+      # too, where the event's own commit is not the tag's.
+      - name: Check the tag still points at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-tag-target.sh
+          "${{ github.event.inputs.tag || github.ref_name }}"
+          "${{ needs.resolve.outputs.source }}"
 
-      - uses: softprops/action-gh-release@v2
+      - name: Collect checksums
+        run: |
+          set -euo pipefail
+          LC_ALL=C sort dist/*.sha256 > dist/SHA256SUMS
+          rm -f dist/*.sha256
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS
+
+  publish:
+    name: Publish to crates.io
+    # Tag pushes only. A workflow_dispatch run rebuilds the binaries for a
+    # tag that is already out, so its version is already on the registry and
+    # publishing again could only fail.
+    if: github.event_name == 'push'
+    needs: [resolve, prepare, release]
+    runs-on: ubuntu-latest
+    # Holds the registry token, so it can be gated on an approval.
+    environment: crates-io
+    steps:
+      # The commit prepare packaged, not the tag: checkout resolves a tag
+      # afresh, so a force-push during an approval wait would land here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source }}
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch, 2026-09-03
+        with:
+          toolchain: ${{ env.RELEASE_TOOLCHAIN }}
+
+      # The prepare job checked the tag against the tag's own Cargo.toml.
+      # This one checks it against the commit that is about to be published.
+      - name: Check the tag against the crate version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: .github/scripts/check-tag-version.sh "$TAG"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: crate
+          path: prepared
+
+      # cargo has no way to upload a .crate file it did not just build, so
+      # the crate is assembled again here and required to come out identical
+      # to the one prepare validated. cargo package is reproducible from a
+      # given commit, so anything else means the two jobs did not see the
+      # same source, and the upload does not happen.
+      - name: Repackage and compare with the prepared crate
+        run: |
+          set -euo pipefail
+          cargo package --locked
+          crate="target/package/librespeed-cli-${{ needs.prepare.outputs.version }}.crate"
+          got="$(sha256sum "$crate" | cut -d' ' -f1)"
+          want="${{ needs.prepare.outputs.sha256 }}"
+          if [ "$got" != "$want" ]; then
+            echo "::error::the crate built here is not the one prepare validated"
+            echo "prepared: $want"
+            echo "here:     $got"
+            diff <(tar tzf "prepared/librespeed-cli-${{ needs.prepare.outputs.version }}.crate" | LC_ALL=C sort) \
+                 <(tar tzf "$crate" | LC_ALL=C sort) || true
+            exit 1
+          fi
+          echo "crate matches the prepared one: $got"
+
+      # Says whether the crate can be published at all, before the token is
+      # used for anything, so "cannot publish" and "upload failed" stay
+      # distinguishable in the log.
+      - name: Dry run
+        run: cargo publish --locked --dry-run
+
+      # Again, here: between the release job's check and this step lies the
+      # approval wait on the crates-io environment, which can be hours. An
+      # upload is the one step of this pipeline that cannot be taken back.
+      - name: Check the tag still points at this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/check-tag-target.sh
+          "${{ github.ref_name }}"
+          "${{ needs.resolve.outputs.source }}"
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked

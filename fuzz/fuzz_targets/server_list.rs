@@ -6,8 +6,9 @@ fuzz_target!(|data: &[u8]| {
     let Ok(servers) = serde_json::from_slice::<Vec<librespeed_cli::defs::Server>>(data) else {
         return;
     };
+    let out = librespeed_cli::output::Output::default();
     for server in &servers {
-        let _ = server.sponsor();
+        let _ = server.sponsor(out);
         let _ = server.get_url();
     }
     let _ = librespeed_cli::speedtest::preprocess_servers(

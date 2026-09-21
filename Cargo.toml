@@ -9,6 +9,29 @@ repository = "https://github.com/librespeed/speedtest-cli-rust"
 readme = "README.md"
 keywords = ["speedtest", "librespeed", "network", "benchmark", "cli"]
 categories = ["command-line-utilities", "network-programming"]
+# An allow list, not a deny list: a file added at the repository root
+# stays out of the crate unless it is named here, so a scratch file or a
+# new CI helper cannot be published by forgetting to exclude it. Cargo
+# gives `include` precedence over `exclude`, so this list is the whole
+# rule and there is no second one to keep in step with it.
+#
+# `/src` is listed as a directory so a module can never be packaged
+# without data it includes. Cargo adds the normalized `Cargo.toml`,
+# `Cargo.toml.orig` and `.cargo_vcs_info.json` by itself.
+#
+# `Cargo.lock` is in the crate on purpose. This crate ships a binary, so
+# `cargo install --locked librespeed-cli` builds it against the exact
+# dependency versions this repository tests, rather than against
+# whatever the resolver picks on the day of the install.
+include = [
+    "/Cargo.lock",
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/SECURITY.md",
+    "/build.rs",
+    "/src",
+]
 
 [lib]
 name = "librespeed_cli"
