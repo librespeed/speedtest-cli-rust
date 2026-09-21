@@ -2,20 +2,37 @@
 
 use clap::{ArgAction, Parser};
 
+/// Go's `time.Duration` counts nanoseconds in an int64, so a second count
+/// above this overflows in the Go client; it is the largest duration either
+/// client can carry out.
+const MAX_GO_SECONDS: u64 = i64::MAX as u64 / 1_000_000_000;
+
+// Negative numbers are let through to the value parsers, so `--duration -1` is
+// refused as out of range instead of being taken for an unknown option, and
+// `--server -1` (every server) works without the `=` form.
+//
+// The option texts are the Go client's, word for word. Where one ends in a
+// period it is given as `help`, because clap drops a doc comment's final period.
 #[derive(Parser, Debug)]
 #[command(
     name = "librespeed-cli",
     about = "Test your Internet speed with LibreSpeed",
     version = None,
-    disable_version_flag = true
+    disable_version_flag = true,
+    disable_help_flag = true,
+    allow_negative_numbers = true
 )]
 pub struct Cli {
+    #[arg(short = 'h', long, action = ArgAction::Help, help = "show help")]
+    pub help: Option<bool>,
+
     /// Show the version number and exit
     #[arg(long)]
     pub version: bool,
 
     /// Force IPv4 only
-    #[arg(long = "ipv4", short = '4', conflicts_with = "ipv6")]
+    // Both may be given; --ipv4 wins, the precedence the Go client applies.
+    #[arg(long = "ipv4", short = '4')]
     pub ipv4: bool,
 
     /// Force IPv6 only
@@ -36,7 +53,8 @@ pub struct Cli {
     pub no_icmp: bool,
 
     /// Concurrent HTTP requests being made
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..=64))]
+    // Zero parses, so it gets the Go client's own message for it.
+    #[arg(long, default_value_t = 3)]
     pub concurrent: u32,
 
     /// Display values in bytes instead of bits. Does not affect
@@ -67,11 +85,11 @@ pub struct Cli {
     #[arg(long)]
     pub csv: bool,
 
-    /// Single character delimiter to use in CSV output
     #[arg(
         long = "csv-delimiter",
         value_name = "CSV_DELIMITER",
-        default_value = ","
+        default_value = ",",
+        help = "Single character delimiter (CSV_DELIMITER) to use in CSV output."
     )]
     pub csv_delimiter: String,
 
@@ -84,8 +102,11 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
-    /// Emit NDJSON progress events on stdout while the test runs, ending
-    /// with an event carrying the same report --json prints
+    /// Suppress verbose output, emit newline-delimited JSON events on stdout
+    /// while the test runs: a phase event as each stage starts, a progress
+    /// event a second with the rate so far, and a final result event with the
+    /// same reports --json prints. Speeds listed in Mbps and not affected by
+    /// --bytes
     #[arg(long = "json-stream", conflicts_with_all = ["json", "csv"])]
     pub json_stream: bool,
 
@@ -107,42 +128,46 @@ pub struct Cli {
     #[arg(long = "server-json")]
     pub server_json: Option<String>,
 
-    /// Use an alternative server list from local JSON file,
-    /// or read from stdin with "--local-json -"
-    #[arg(long = "local-json")]
+    #[arg(
+        long = "local-json",
+        help = "Use an alternative server list from local JSON file, or read from stdin with \"--local-json -\"."
+    )]
     pub local_json: Option<String>,
 
     /// SOURCE IP address to bind to
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
 
-    /// Network INTERFACE to bind to
+    /// network INTERFACE to bind to
     #[arg(long, value_name = "INTERFACE")]
     pub interface: Option<String>,
 
-    /// HTTP TIMEOUT in seconds
-    #[arg(long, value_name = "TIMEOUT", default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    #[arg(long, value_name = "TIMEOUT", default_value_t = 15, value_parser = clap::value_parser!(u64).range(..=MAX_GO_SECONDS), help = "HTTP TIMEOUT in seconds.")]
     pub timeout: u64,
 
     /// Upload and download test duration in seconds
-    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    // Zero is accepted, as the Go client accepts it: each phase then runs only
+    // its ramp-up.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(..=MAX_GO_SECONDS))]
     pub duration: u64,
 
     /// Chunks to download from server, chunk size depends on server configuration
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[arg(long, default_value_t = 100)]
     pub chunks: u32,
 
     /// Size of payload being uploaded in KiB
-    #[arg(long = "upload-size", default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65_536))]
+    #[arg(long = "upload-size", default_value_t = 1024)]
     pub upload_size: u32,
 
-    /// Use HTTPS instead of HTTP when communicating with
-    /// LibreSpeed.org operated servers
-    #[arg(long, conflicts_with = "insecure")]
+    /// Force HTTPS for every test server, whichever scheme the server list
+    /// gives. Does not affect how the server list itself is fetched
+    // Both may be given; --secure wins, as it does in the Go client.
+    #[arg(long)]
     pub secure: bool,
 
-    /// Use HTTP instead of HTTPS when communicating with
-    /// LibreSpeed.org operated servers
+    /// Force HTTP for every test server, whichever scheme the server list
+    /// gives. Does not affect how the server list itself is fetched; use
+    /// --server-json with an http:// URL for that
     #[arg(long)]
     pub insecure: bool,
 
@@ -194,8 +219,7 @@ pub struct Cli {
     #[arg(long = "telemetry-extra")]
     pub telemetry_extra: Option<String>,
 
-    /// Firewall mark to set on socket
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, help = "firewall mark to set on socket.")]
     pub fwmark: u32,
 
     /// Allow HTTP/2 when the server offers it. Off by default: HTTP/2 carries
@@ -212,14 +236,104 @@ impl Cli {
     }
 
     /// The CSV delimiter as a single byte.
+    ///
+    /// The Go client quietly uses the first character of a longer value, and
+    /// takes a double quote, which leaves it unable to write any row. Both are
+    /// refused here, as is a character outside ASCII, which the CSV writer
+    /// cannot use as a delimiter.
     pub fn csv_delimiter_byte(&self) -> anyhow::Result<u8> {
-        let bytes = self.csv_delimiter.as_bytes();
-        if bytes.len() != 1 {
-            anyhow::bail!(
-                "--csv-delimiter must be a single character, got {:?}",
+        match self.csv_delimiter.as_bytes() {
+            [b] if *b != b'"' => Ok(*b),
+            _ => anyhow::bail!(
+                "--csv-delimiter must be a single ASCII character other than '\"', got {:?}",
                 self.csv_delimiter
+            ),
+        }
+    }
+}
+
+/// The Go client's wording for the usage errors people commonly make, or
+/// `None` for the rest, which keep clap's own message.
+///
+/// The Go client prints these after `Incorrect Usage:` on stdout and again
+/// after `Terminated due to error:` on stderr. Scripts wrapping either client
+/// show that last line to the user, so the common cases read the same.
+pub fn go_usage_error(e: &clap::Error) -> Option<String> {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+
+    let context = |kind| match e.get(kind) {
+        Some(ContextValue::String(s)) => Some(s.as_str()),
+        _ => None,
+    };
+    // `--concurrent <CONCURRENT>` or `--bogus=1`: the bare option name, which
+    // Go writes after a single dash.
+    let option = |arg: &str| {
+        let name = arg.trim_start_matches('-');
+        name.split([' ', '=']).next().unwrap_or(name).to_string()
+    };
+
+    match e.kind() {
+        ErrorKind::UnknownArgument => {
+            let arg = context(ContextKind::InvalidArg)?;
+            Some(if arg.starts_with('-') {
+                format!("flag provided but not defined: -{}", option(arg))
+            } else {
+                // The Go client silently ignores this argument and every
+                // option after it; refusing it is the safer reading.
+                format!("unexpected argument: {arg}")
+            })
+        }
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
+            let name = option(context(ContextKind::InvalidArg)?);
+            let value = context(ContextKind::InvalidValue).unwrap_or_default();
+            if e.kind() == ErrorKind::InvalidValue && value.is_empty() {
+                return Some(format!("flag needs an argument: -{name}"));
+            }
+            // Go calls a number it cannot take out of range, and anything
+            // else a parse error.
+            let reason = if value.parse::<i128>().is_ok() {
+                "value out of range"
+            } else {
+                "parse error"
+            };
+            Some(format!(
+                "invalid value {value:?} for flag -{name}: {reason}"
+            ))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A negative number is a value to range-check, not an unknown option, and
+    // `--server -1` selects every server.
+    #[test]
+    fn negative_numbers_are_values_not_options() {
+        let err = Cli::try_parse_from(["librespeed-cli", "--duration", "-1"]).unwrap_err();
+        assert_eq!(
+            go_usage_error(&err).as_deref(),
+            Some("invalid value \"-1\" for flag -duration: value out of range")
+        );
+        let cli = Cli::try_parse_from(["librespeed-cli", "--server", "-1"]).unwrap();
+        assert_eq!(cli.server, vec![-1]);
+    }
+
+    #[test]
+    fn csv_delimiter_is_one_ascii_character_other_than_a_quote() {
+        let delimiter = |value: &str| {
+            let cli = Cli::try_parse_from(["librespeed-cli", "--csv-delimiter", value]).unwrap();
+            cli.csv_delimiter_byte().map_err(|e| e.to_string())
+        };
+        assert_eq!(delimiter("\t"), Ok(b'\t'));
+        for refused in [";;", "\u{e9}", "\""] {
+            let err = delimiter(refused).unwrap_err();
+            assert!(
+                err.starts_with("--csv-delimiter must be a single ASCII character other than"),
+                "{err}"
             );
         }
-        Ok(bytes[0])
     }
 }

@@ -14,7 +14,7 @@ use crate::helper::{self, TestContext};
 use crate::http::connector::resolve;
 use crate::http::{BindOptions, HttpClient, IpFamily, TlsSettings};
 use crate::report;
-use crate::{output, write_debug, write_out, write_ui};
+use crate::{output, write_debug, write_error, write_out, write_ui};
 
 /// The default remote server JSON URL.
 const SERVER_LIST_URL: &str = "https://librespeed.org/backend-servers/servers.php";
@@ -70,6 +70,19 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
 
     let telemetry = resolve_telemetry(cli)?;
 
+    if cli.concurrent == 0 {
+        write_error!("Concurrent requests cannot be lower than 1: 0 is given\n");
+        anyhow::bail!("invalid concurrent requests setting");
+    }
+
+    // Read here rather than left to the TLS backend, so an unreadable bundle
+    // is reported the way the Go client reports it: the error on its own.
+    if let Some(path) = &cli.ca_cert {
+        if let Err(e) = read_file(path, u64::MAX) {
+            output::fatal(e);
+        }
+    }
+
     let family = match (cli.ipv4, cli.ipv6) {
         (true, _) => IpFamily::V4,
         (_, true) => IpFamily::V6,
@@ -115,7 +128,16 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         ForceScheme::Nothing
     };
 
-    let servers = load_servers(cli, &client, force_scheme).await?;
+    let servers = match load_servers(cli, &client, force_scheme).await {
+        Ok(servers) => servers,
+        Err(e) => {
+            write_error!(
+                "Error when fetching server list: {}\n",
+                output::error_text(&e)
+            );
+            return Err(e);
+        }
+    };
     write_debug!("Loaded {} server(s)\n", servers.len());
 
     // If --list is given, list all the servers fetched and exit.
@@ -229,8 +251,16 @@ fn resolve_telemetry(cli: &Cli) -> anyhow::Result<TelemetryServer> {
     }
 
     if let Some(path) = &cli.telemetry_json {
-        let b = std::fs::read(path).with_context(|| format!("Cannot read {path}"))?;
-        telemetry = serde_json::from_slice(&b).with_context(|| format!("Error parsing {path}"))?;
+        // A readable line naming the file, then the error on its own as the
+        // reason the run ended, as the Go client reports both.
+        let b = read_file(path, u64::MAX).map_err(|e| {
+            write_error!("Cannot read {path}: {e}\n");
+            anyhow::anyhow!(e)
+        })?;
+        telemetry = serde_json::from_slice(&b).map_err(|e| {
+            write_error!("Error parsing {path}: {e}\n");
+            anyhow::anyhow!(e)
+        })?;
     }
 
     match &cli.telemetry_level {
@@ -329,15 +359,7 @@ async fn load_servers(
         }
         Some(path) => {
             write_ui!("Using local JSON server list: {path}\n");
-            let file = std::fs::File::open(path).with_context(|| format!("cannot read {path}"))?;
-            let mut buf = Vec::new();
-            std::io::Read::take(file, MAX_LOCAL_JSON + 1)
-                .read_to_end(&mut buf)
-                .with_context(|| format!("cannot read {path}"))?;
-            if buf.len() as u64 > MAX_LOCAL_JSON {
-                anyhow::bail!("{path} exceeds {MAX_LOCAL_JSON} bytes");
-            }
-            bytes::Bytes::from(buf)
+            bytes::Bytes::from(read_file(path, MAX_LOCAL_JSON).map_err(|e| anyhow::anyhow!(e))?)
         }
         None => {
             let server_url = cli.server_json.as_deref().unwrap_or(SERVER_LIST_URL);
@@ -363,16 +385,13 @@ async fn load_servers(
                         .unwrap_or_else(|_| format!("{server_url}/.well-known/librespeed"));
 
                     write_ui!("Retry with /.well-known/librespeed\n");
-                    fetch_servers(client, &retry, cli, force_scheme, filter)
-                        .await
-                        .context("Error when fetching server list")
+                    fetch_servers(client, &retry, cli, force_scheme, filter).await
                 }
             };
         }
     };
 
-    let servers: Vec<Server> =
-        serde_json::from_slice(&raw).context("Error when fetching server list")?;
+    let servers: Vec<Server> = serde_json::from_slice(&raw)?;
 
     preprocess_servers(servers, force_scheme, &cli.exclude, &cli.server, filter)
 }
@@ -447,7 +466,9 @@ pub fn preprocess_servers(
             .filter(|s| specific.contains(&s.id))
             .collect();
         if ret.is_empty() {
-            anyhow::bail!("specified server(s) not found: {specific:?}");
+            // Space separated, the way Go prints a slice of ints.
+            let ids: Vec<String> = specific.iter().map(i64::to_string).collect();
+            anyhow::bail!("specified server(s) not found: [{}]", ids.join(" "));
         }
         return Ok(ret);
     }
@@ -516,6 +537,38 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
         .filter_map(|r| async move { r })
         .collect()
         .await
+}
+
+/// Reads a file of at most `cap` bytes, reporting a failure the way Go's `os`
+/// package words it: the operation, the path and the system's message.
+fn read_file(path: impl AsRef<std::path::Path>, cap: u64) -> Result<Vec<u8>, String> {
+    let path = path.as_ref();
+    let shown = path.display();
+    let file = std::fs::File::open(path).map_err(|e| format!("open {shown}: {}", go_io(&e)))?;
+
+    let mut buf = Vec::new();
+    std::io::Read::take(file, cap.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read {shown}: {}", go_io(&e)))?;
+    if buf.len() as u64 > cap {
+        return Err(format!("{shown} exceeds {cap} bytes"));
+    }
+    Ok(buf)
+}
+
+/// An I/O error's message without the code Rust appends, lower-cased on Unix
+/// where Go's own table of system messages is.
+fn go_io(e: &std::io::Error) -> String {
+    let text = e.to_string();
+    let text = text.split(" (os error ").next().unwrap_or_default();
+    if cfg!(unix) {
+        let mut chars = text.chars();
+        chars.next().map_or_else(String::new, |first| {
+            first.to_lowercase().collect::<String>() + chars.as_str()
+        })
+    } else {
+        text.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -594,5 +647,22 @@ mod tests {
         let servers = vec![server(1, "https://a"), server(2, "https://b")];
         let out = preprocess_servers(servers, ForceScheme::Nothing, &[], &[2], false).unwrap();
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn unknown_specific_servers_are_listed_the_way_go_prints_a_slice() {
+        let servers = vec![server(1, "https://a")];
+        let err =
+            preprocess_servers(servers, ForceScheme::Nothing, &[], &[99, 98], true).unwrap_err();
+        assert_eq!(err.to_string(), "specified server(s) not found: [99 98]");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_errors_read_the_way_gos_do() {
+        assert_eq!(
+            read_file("/nonexistent/librespeed-cli", u64::MAX).unwrap_err(),
+            "open /nonexistent/librespeed-cli: no such file or directory"
+        );
     }
 }

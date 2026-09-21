@@ -531,36 +531,237 @@ fn unknown_server_id_fails_cleanly() {
 
 #[test]
 fn out_of_range_numeric_options_are_rejected() {
-    // Clap exits 2 for a usage error. Before these were bounded, a negative
-    // value wrapped into a huge unsigned one: --upload-size=-1 aborted the
-    // process with a capacity overflow and --duration=-1 ran effectively
-    // forever.
-    for arg in [
-        "--concurrent=0",
-        "--concurrent=65",
-        "--duration=-1",
-        "--duration=0",
-        "--chunks=-1",
-        "--upload-size=-1",
-        "--upload-size=0",
-        "--timeout=0",
+    // Before the bounds existed a negative value wrapped into a huge unsigned
+    // one, so --upload-size=-1 aborted the process with a capacity overflow and
+    // --duration=-1 ran effectively forever. The Go client takes both, and
+    // panics on the first. They are refused, in Go's words for a bad number.
+    for (option, value) in [
+        ("duration", "-1"),
+        ("chunks", "-1"),
+        ("upload-size", "-1"),
+        ("timeout", "-1"),
+        ("duration", "9223372037"),
     ] {
-        let out = run(&[arg, "--list"]);
-        assert_eq!(out.status.code(), Some(2), "{arg} was accepted");
+        let out = run(&[&format!("--{option}"), value, "--list"]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "--{option} {value} was accepted"
+        );
+        assert_eq!(
+            stdout_of(&out),
+            format!("Incorrect Usage: invalid value \"{value}\" for flag -{option}: value out of range\n\n")
+        );
+    }
+}
+
+// Zero is not a number the Go client refuses, apart from --concurrent, which it
+// refuses in words of its own.
+#[test]
+fn concurrent_zero_is_refused_with_the_go_clients_message() {
+    let out = run(&["--concurrent", "0", "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "Concurrent requests cannot be lower than 1: 0 is given\nTerminated due to error: invalid concurrent requests setting\n"
+    );
+    assert!(stdout_of(&out).is_empty());
+}
+
+// --duration 0, --chunks 0 and --upload-size 0 run, as they do in the Go
+// client: each phase runs only its ramp-up, and the report says what that
+// moved.
+#[test]
+fn zero_duration_chunks_and_upload_size_still_produce_a_report() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("zero");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "0",
+        "--chunks",
+        "0",
+        "--upload-size",
+        "0",
+        "--json",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reports: serde_json::Value = serde_json::from_str(&stdout_of(&out)).expect("valid JSON");
+    assert!(reports[0]["ping"].as_f64().is_some(), "{reports}");
+}
+
+#[test]
+fn command_lines_the_go_client_accepts_are_not_rejected() {
+    // The upper bounds were this port's own invention: a high --concurrent is
+    // how a high bandwidth-delay link gets filled, and --timeout 0 means no
+    // timeout, which is what a slow link needs.
+    //
+    // --list, not --help: clap answers --help before it checks for conflicts.
+    let backend = MockBackend::start();
+    let list = backend.server_list("accepted");
+    for args in [
+        vec!["--concurrent=100"],
+        vec!["--timeout=0"],
+        vec!["--ipv4", "--ipv6"],
+        vec!["--secure", "--insecure"],
+        vec!["--upload-size=70000"],
+        vec!["--duration=4000"],
+        vec!["--chunks=200000"],
+    ] {
+        let mut argv = args.clone();
+        argv.extend(["--local-json", list.to_str().unwrap(), "--list"]);
+        let out = run(&argv);
+        assert_eq!(out.status.code(), Some(0), "{args:?} was rejected");
     }
 }
 
 #[test]
 fn mutually_exclusive_options_are_rejected() {
     for args in [
-        vec!["--ipv4", "--ipv6"],
-        vec!["--secure", "--insecure"],
+        vec!["--json", "--json-stream"],
         vec!["--server", "1", "--exclude", "2"],
     ] {
         let out = run(&args);
-        assert_eq!(out.status.code(), Some(2), "{args:?} was accepted");
+        assert_eq!(out.status.code(), Some(1), "{args:?} was accepted");
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
     }
+}
+
+// A usage error is reported on both streams, the way the Go client's CLI
+// library and its main do between them, and exits 1.
+#[test]
+fn common_usage_errors_are_reported_the_way_the_go_client_reports_them() {
+    for (args, message) in [
+        (
+            vec!["--bogus-flag"],
+            "flag provided but not defined: -bogus-flag",
+        ),
+        (
+            vec!["--concurrent", "abc"],
+            "invalid value \"abc\" for flag -concurrent: parse error",
+        ),
+        (vec!["--duration"], "flag needs an argument: -duration"),
+        (vec!["--list", "foo"], "unexpected argument: foo"),
+    ] {
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(stdout_of(&out), format!("Incorrect Usage: {message}\n\n"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            format!("Terminated due to error: {message}\n")
+        );
+    }
+}
+
+#[test]
+fn an_unknown_server_id_names_every_id_asked_for() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("missing");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "99",
+        "--server",
+        "98",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "\nError when fetching server list: specified server(s) not found: [99 98]\n"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.ends_with("\nTerminated due to error: specified server(s) not found: [99 98]\n"),
+        "{stderr}"
+    );
+}
+
+// A file that cannot be read is named the way Go's os package names it, inside
+// the frame the Go client puts around each of these options.
+#[test]
+fn unreadable_files_are_reported_the_way_the_go_client_reports_them() {
+    let missing = std::env::temp_dir().join("librespeed-cli-test-does-not-exist.json");
+    let missing = missing.to_str().unwrap();
+
+    let out = run(&["--local-json", missing, "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "\nError when fetching server list: open {missing}: "
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("\nTerminated due to error: open {missing}: ")),
+        "{stderr}"
+    );
+
+    let out = run(&["--telemetry-json", missing, "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(&format!("Cannot read {missing}: open {missing}: ")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("\nTerminated due to error: open {missing}: ")),
+        "{stderr}"
+    );
+
+    // An unreadable CA bundle ends the run with the error on its own.
+    let out = run(&["--ca-cert", missing, "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.starts_with(&format!("open {missing}: ")), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    #[cfg(unix)]
+    assert!(
+        stderr.ends_with(": no such file or directory\n"),
+        "{stderr}"
+    );
+}
+
+// clap's layout, the Go client's wording for every option.
+#[test]
+fn help_carries_the_go_clients_option_texts() {
+    let out = run(&["--help"]);
+    assert_eq!(out.status.code(), Some(0));
+    let flat: String = stdout_of(&out)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for text in [
+        "-h, --help show help",
+        "Force HTTPS for every test server, whichever scheme the server list gives. Does not affect how the server list itself is fetched",
+        "Force HTTP for every test server, whichever scheme the server list gives. Does not affect how the server list itself is fetched; use --server-json with an http:// URL for that",
+        "emit newline-delimited JSON events on stdout while the test runs",
+        "or read from stdin with \"--local-json -\".",
+        "network INTERFACE to bind to",
+        "firewall mark to set on socket.",
+        "Single character delimiter (CSV_DELIMITER) to use in CSV output.",
+        "HTTP TIMEOUT in seconds.",
+        "This option overrides --telemetry-level",
+    ] {
+        assert!(flat.contains(text), "missing from --help: {text}\n{flat}");
+    }
+    // The one option this port adds is documented too.
+    assert!(flat.contains("--http2"), "{flat}");
 }
 
 // A list that arrives but does not parse sends the Go client to the discovery
@@ -577,6 +778,10 @@ fn an_unparseable_remote_list_is_retried_at_the_discovery_endpoint() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("Retry with /.well-known/librespeed\n"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\nError when fetching server list: "),
         "{stderr}"
     );
 }
