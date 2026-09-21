@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1,
+    "name": "Fixture Live",
+    "server": "http://127.0.0.1:@LIVE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "Fixture Sponsor",
+    "sponsorURL": "example.org"
+  },
+  {
+    "id": 2,
+    "name": "Fixture Dead",
+    "server": "http://127.0.0.1:@DEAD@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  }
+]

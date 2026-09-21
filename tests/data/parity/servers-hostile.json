@@ -1,0 +1,13 @@
+[
+  {
+    "id": 1,
+    "name": "Evil\u001b[31mRed\u009b1m \u202eTXEN\u202c \udb40\udc41\udb40\udc42tag \u061c\u00ad\u180e & <b> \u00a0nbsp",
+    "server": "http://127.0.0.1:@HOSTILE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "Spon\u202esor\u001b]0;title\u0007",
+    "sponsorURL": "example.org"
+  }
+]

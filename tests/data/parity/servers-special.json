@@ -1,0 +1,57 @@
+[
+  {
+    "id": 1,
+    "name": "AT&T <Lab>",
+    "server": "http://127.0.0.1:@LIVE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 2,
+    "name": " Leading space",
+    "server": "http://127.0.0.1:@LIVE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 3,
+    "name": "\\.",
+    "server": "http://127.0.0.1:@LIVE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 4,
+    "name": "Quote\"d;semi,comma",
+    "server": "http://127.0.0.1:@LIVE@",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 5,
+    "name": "=2+5+cmd|' /C calc'!A0",
+    "server": "http://127.0.0.1:@LIVE@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  }
+]

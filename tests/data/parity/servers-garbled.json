@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "name": "Garbled getIP",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "garbled-getip.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 2,
+    "name": "Garbled probe",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "garbled-ping.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 3,
+    "name": "Telemetry fails",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  }
+]

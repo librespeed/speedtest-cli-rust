@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "name": "No scheme",
+    "server": "localhost/backend",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 2,
+    "name": "Bare host",
+    "server": "example.com",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 3,
+    "name": "Upper",
+    "server": "HTTP://Example.COM/x",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "empty.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  }
+]
