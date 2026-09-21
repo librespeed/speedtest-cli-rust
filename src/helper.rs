@@ -300,6 +300,8 @@ pub async fn do_speed_test(
 
         // --csv takes precedence over --json, matching speedtest-cli.
         if cli.csv {
+            // The text fields came off the wire; the report sanitizes and
+            // defuses them as it renders them.
             reps_csv.push(CSVReport {
                 timestamp: report::timestamp_now(),
                 name: current_server.name.clone(),
@@ -308,7 +310,7 @@ pub async fn do_speed_test(
                 jitter: round2(jitter),
                 download: round2(download_value),
                 upload: round2(upload_value),
-                share: share_link,
+                share: share_link.clone(),
                 ip: isp_info.ip(),
             });
         } else if cli.json || cli.json_stream {
@@ -322,7 +324,7 @@ pub async fn do_speed_test(
                     name: current_server.name.clone(),
                     url: current_server.server.clone(),
                 },
-                client: Client { ip_info },
+                client: Client::new(ip_info),
                 tls: status.tls.as_ref().map(|t| report::TLSReport {
                     version: t.version.clone(),
                     cipher: t.cipher.clone(),

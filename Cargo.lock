@@ -687,6 +687,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-tls",
  "hyper-util",
+ "icu_properties",
  "libc",
  "native-tls",
  "rand 0.8.7",

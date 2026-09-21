@@ -59,6 +59,23 @@ impl MockBackend {
         std::fs::write(&path, json).expect("write server list");
         path
     }
+    /// Writes a server list whose text is as hostile as a server list can be,
+    /// pointing at the backend's hostile getIP answer.
+    fn hostile_server_list(&self, name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "librespeed-cli-test-{name}-hostile-{}.json",
+            self.addr.port()
+        ));
+        // Written with JSON escapes so the file itself stays plain ASCII: an
+        // ESC, a C1 control, a bidi override, tag characters, an Arabic letter
+        // mark, a soft hyphen, and the characters Go's JSON encoder escapes.
+        let json = format!(
+            r#"[{{"name":"Evil\u001b[31mRed\u009b1m \u202eTXEN\u202c \udb40\udc41\udb40\udc42tag \u061c\u00ad\u180e & <b>","server":"{}","id":1,"dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP-hostile.php","sponsorName":"Spon\u202esor\u001b]0;title\u0007","sponsorURL":"example.invalid"}}]"#,
+            self.url()
+        );
+        std::fs::write(&path, json).expect("write hostile server list");
+        path
+    }
 }
 
 fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::Result<()> {
@@ -142,6 +159,13 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
         )?,
         ("GET", "/getIP.php") => {
             let json = br#"{"processedString":"203.0.113.7 - Example ISP","rawIspInfo":{"ip":"203.0.113.7","hostname":"host.example","city":"Testville","region":"Testshire","country":"XX","loc":"0,0","org":"AS64496 Example ISP","postal":"00000","timezone":"UTC","readme":"https://ipinfo.io/missingauth"}}"#;
+            respond(&mut stream, json, "application/json")?
+        }
+        // What a malicious or compromised backend could answer: escape
+        // sequences, C1 controls, bidi overrides, invisible tag characters and
+        // the HTML delimiters Go's JSON encoder escapes.
+        ("GET", "/getIP-hostile.php") => {
+            let json = br#"{"processedString":"203.0.113.9\u001b[2J - Evil\u202eISP","rawIspInfo":{"ip":"203.0.113.9\u001b[2J","hostname":"h\u009b31m.example","city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","loc":"0,0\u180e","org":"=Evil\udb40\udc41ISP & <b>","postal":"0\u007f","timezone":"UTC\u2028","readme":"x"}}"#;
             respond(&mut stream, json, "application/json")?
         }
         ("POST", "/results/telemetry.php") => {
@@ -635,6 +659,113 @@ fn mutually_exclusive_options_are_rejected() {
         assert_eq!(out.status.code(), Some(1), "{args:?} was accepted");
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
     }
+}
+
+// Hostile text from a backend reaches no output at all: not the terminal, not
+// the CSV file, and not the JSON report -- which is where the Go client passes
+// it through.
+#[test]
+fn hostile_backend_text_is_stripped_from_every_output() {
+    let backend = MockBackend::start();
+    let list = backend.hostile_server_list("evil");
+    let path = list.to_str().unwrap();
+
+    for mode in [
+        vec!["--json"],
+        vec!["--csv"],
+        vec!["--simple"],
+        vec!["--list"],
+        vec![],
+    ] {
+        let mut argv = vec![
+            "--local-json",
+            path,
+            "--server",
+            "1",
+            "--no-icmp",
+            "--duration",
+            "1",
+            "--no-download",
+            "--no-upload",
+        ];
+        argv.extend(mode.iter().copied());
+        let out = run(&argv);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{mode:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let both = format!(
+            "{}{}",
+            stdout_of(&out),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for bad in [
+            '\u{1b}',
+            '\u{7}',
+            '\u{9b}',
+            '\u{7f}',
+            '\u{202e}',
+            '\u{202c}',
+            '\u{200b}',
+            '\u{61c}',
+            '\u{ad}',
+            '\u{180e}',
+            '\u{e0041}',
+            '\u{2028}',
+        ] {
+            assert!(
+                !both.contains(bad),
+                "{:#x} survived in {mode:?} output: {both:?}",
+                bad as u32
+            );
+        }
+    }
+
+    // The fields are still reported, cleaned, and what Go escapes is escaped.
+    let out = run(&[
+        "--local-json",
+        path,
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "1",
+        "--no-download",
+        "--no-upload",
+        "--json",
+    ]);
+    let raw = stdout_of(&out);
+    assert!(
+        raw.contains(r#""name":"Evil[31mRed1m TXEN tag  \u0026 \u003cb\u003e""#),
+        "{raw}"
+    );
+    assert!(raw.contains(r#""ip":"203.0.113.9[2J""#), "{raw}");
+    assert!(
+        raw.contains(r#""org":"=EvilISP \u0026 \u003cb\u003e""#),
+        "{raw}"
+    );
+    assert!(raw.contains(r#""hostname":"h31m.example""#), "{raw}");
+    assert!(raw.contains(r#""timezone":"UTC""#), "{raw}");
+
+    // The CSV row carries the same cleaned text, including the IP column.
+    let out = run(&[
+        "--local-json",
+        path,
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "1",
+        "--no-download",
+        "--no-upload",
+        "--csv",
+    ]);
+    let row = stdout_of(&out);
+    assert!(row.contains(",Evil[31mRed1m TXEN tag  & <b>,"), "{row}");
+    assert!(row.ends_with(",203.0.113.9[2J\n"), "{row}");
 }
 
 // A usage error is reported on both streams, the way the Go client's CLI
