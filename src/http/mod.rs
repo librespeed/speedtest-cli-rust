@@ -42,6 +42,9 @@ pub const MAX_TELEMETRY_RESPONSE: usize = 64 * 1024;
 const H2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 const H2_CONNECTION_WINDOW: u32 = 1024 * 1024 * 1024;
 
+/// The cap on each HTTP/1 connection's buffers: hyper's minimum.
+pub(crate) const H1_MAX_BUF: usize = 8192;
+
 pub type ReqBody = BoxBody<Bytes, io::Error>;
 
 /// Whether two URLs share a scheme, host and effective port.
@@ -79,10 +82,44 @@ async fn collect_limited(body: Incoming, limit: usize) -> anyhow::Result<Bytes> 
     Ok(out.freeze())
 }
 
+/// The hyper client configuration `HttpClient` is built from.
+///
+/// `bounded` caps a connection's HTTP/1 buffers, and only the upload pool asks
+/// for it. The upload total counts body frames as hyper takes them, so what
+/// hyper holds when the window closes was counted but never sent: with its
+/// default buffer, ~400 KB per connection, that overstated a 1 Mbit uplink by
+/// a quarter to a half. The cap is hyper's minimum, leaving 8 KiB and one
+/// frame. It binds the read buffer as well, which cost a 65 Gbit loopback
+/// download a fifth of its rate and would limit every response head to 8 KiB,
+/// so downloads, pings and the control-plane requests keep hyper's defaults.
+pub(crate) fn client_builder(
+    concurrent: usize,
+    http2: bool,
+    bounded: bool,
+) -> hyper_util::client::legacy::Builder {
+    // Keep enough connections alive for every concurrent stream, matching the
+    // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder.pool_max_idle_per_host(concurrent + 2);
+
+    if bounded {
+        builder.http1_max_buf_size(H1_MAX_BUF);
+    }
+
+    if http2 {
+        builder
+            .http2_initial_stream_window_size(H2_STREAM_WINDOW)
+            .http2_initial_connection_window_size(H2_CONNECTION_WINDOW);
+    }
+    builder
+}
+
 /// The program's HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client<tls::Connector, ReqBody>,
+    /// The pool whose buffers are capped, for the upload test only.
+    upload: Client<tls::Connector, ReqBody>,
     timeout: Duration,
     user_agent: HeaderValue,
 }
@@ -96,30 +133,49 @@ impl HttpClient {
         user_agent: &str,
     ) -> anyhow::Result<Self> {
         let https = tls::build(bind, tls_settings)?;
-
-        // Keep enough connections alive for every concurrent stream, matching the
-        // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
-        let mut builder = Client::builder(TokioExecutor::new());
-        builder.pool_max_idle_per_host(concurrent + 2);
-
-        if tls_settings.http2 {
-            builder
-                .http2_initial_stream_window_size(H2_STREAM_WINDOW)
-                .http2_initial_connection_window_size(H2_CONNECTION_WINDOW);
-        }
-
-        let inner = builder.build(https);
+        let inner = client_builder(concurrent, tls_settings.http2, false).build(https.clone());
+        let upload = client_builder(concurrent, tls_settings.http2, true).build(https);
 
         Ok(Self {
             inner,
+            upload,
             timeout,
             user_agent: HeaderValue::from_str(user_agent)?,
         })
     }
 
+    /// The same client, sending over the pool whose buffers are capped.
+    ///
+    /// Only the upload test wants that cap: it keeps what hyper has counted
+    /// but not sent small, and it costs a download speed.
+    pub fn for_uploads(&self) -> Self {
+        Self {
+            inner: self.upload.clone(),
+            ..self.clone()
+        }
+    }
+
     /// The configured per-request timeout (`--timeout`).
+    ///
+    /// Zero means none, as it does in the Go client, which is what a slow link
+    /// needs when the transfer legitimately outlasts any sensible limit.
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Runs a request under the configured timeout, or without one when it is
+    /// zero.
+    async fn with_timeout<T>(
+        &self,
+        fut: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        if self.timeout.is_zero() {
+            return fut.await;
+        }
+
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
     }
 
     /// Issues a request, following redirects the way Go's `http.Client` does.
@@ -219,9 +275,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, body))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Posts a body and reads the whole response, used for telemetry.
@@ -241,9 +295,7 @@ impl HttpClient {
             Ok::<_, anyhow::Error>((status, out))
         };
 
-        tokio::time::timeout(self.timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
+        self.with_timeout(fut).await
     }
 
     /// Sends a request without buffering the response body, for the transfer tests.
