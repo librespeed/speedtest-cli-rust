@@ -86,7 +86,7 @@ serde = { version = "1", features = ["derive"] }
 tokio-native-tls = { version = "0.3", optional = true }
 serde_json = { version = "1", features = ["raw_value"] }
 socket2 = { version = "0.5", features = ["all"] }
-surge-ping = "0.8"
+surge-ping = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
 tower-service = "0.3"
 url = "2"
