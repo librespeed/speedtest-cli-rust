@@ -47,10 +47,10 @@ pub async fn do_speed_test(
         let tlog = TelemetryLog::new();
         tlog.set_level(ctx.telemetry.get_level());
 
-        let url = current_server.get_url().map_err(|e| {
-            write_error!("Failed to get server URL: {e}\n");
-            e
-        })?;
+        let url = match current_server.get_url() {
+            Ok(url) => url,
+            Err(e) => return Err(report_failure("Failed to get server URL", e)),
+        };
         let hostname = url.host_str().unwrap_or_default().to_string();
 
         write_ui!(
@@ -64,7 +64,8 @@ pub async fn do_speed_test(
             write_ui!("Sponsored by: {}\n", output::sanitize(&sponsor_msg));
         }
 
-        if !current_server.is_up(ctx.client, &tlog).await {
+        let status = current_server.is_up(ctx.client, &tlog).await;
+        if !status.up {
             write_ui!(
                 "Selected server {} ({}) is not responding at the moment, try again later\n",
                 output::sanitize(&current_server.name),
@@ -81,10 +82,7 @@ pub async fn do_speed_test(
             .await
         {
             Ok(i) => i,
-            Err(e) => {
-                write_error!("Failed to get IP info: {e}\n");
-                return Err(e);
-            }
+            Err(e) => return Err(report_failure("Failed to get IP info", e)),
         };
         write_ui!(
             "You're testing from: {}\n",
@@ -117,8 +115,7 @@ pub async fn do_speed_test(
                 if let Some(s) = spinner {
                     s.stop("").await;
                 }
-                write_error!("Failed to get ping and jitter: {e}\n");
-                return Err(e);
+                return Err(report_failure("Failed to get ping and jitter", e));
             }
         };
 
@@ -146,10 +143,7 @@ pub async fn do_speed_test(
             output::stream_event(r#"{"event":"phase","phase":"download"}"#);
             match current_server.download(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
-                Err(e) => {
-                    write_error!("Failed to get download speed: {e}\n");
-                    return Err(e);
-                }
+                Err(e) => return Err(report_failure("Failed to get download speed", e)),
             }
         };
 
@@ -161,10 +155,7 @@ pub async fn do_speed_test(
             output::stream_event(r#"{"event":"phase","phase":"upload"}"#);
             match current_server.upload(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
-                Err(e) => {
-                    write_error!("Failed to get upload speed: {e}\n");
-                    return Err(e);
-                }
+                Err(e) => return Err(report_failure("Failed to get upload speed", e)),
             }
         };
 
@@ -243,6 +234,10 @@ pub async fn do_speed_test(
                     url: current_server.server.clone(),
                 },
                 client: Client { ip_info },
+                tls: status.tls.as_ref().map(|t| report::TLSReport {
+                    version: t.version.clone(),
+                    cipher: t.cipher.clone(),
+                }),
                 bytes_sent: bytes_written,
                 bytes_received: bytes_read,
                 ping: round2(ping),
@@ -282,6 +277,13 @@ pub async fn do_speed_test(
     }
 
     Ok(())
+}
+
+/// Prints what failed and hands the error on, as the Go client does: the step
+/// and its cause here, and the cause alone again as the reason the run ended.
+fn report_failure(what: &str, e: anyhow::Error) -> anyhow::Error {
+    write_error!("{what}: {}\n", output::error_text(&e));
+    e
 }
 
 /// Sends the result to the telemetry server and returns the share link.

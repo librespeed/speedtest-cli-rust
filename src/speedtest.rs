@@ -14,7 +14,7 @@ use crate::helper::{self, TestContext};
 use crate::http::connector::resolve;
 use crate::http::{BindOptions, HttpClient, IpFamily, TlsSettings};
 use crate::report;
-use crate::{output, write_debug, write_error, write_out, write_ui};
+use crate::{output, write_debug, write_out, write_ui};
 
 /// The default remote server JSON URL.
 const SERVER_LIST_URL: &str = "https://librespeed.org/backend-servers/servers.php";
@@ -291,8 +291,7 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
             } else {
                 "IPv4"
             };
-            write_error!("Address {src} is not a valid {want} address\n");
-            anyhow::bail!("invalid source address");
+            anyhow::bail!("Address {src} is not a valid {want} address");
         }
         write_debug!("Using {src} as source IP\n");
         return Ok(ip);
@@ -304,10 +303,7 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
             write_debug!("Using {ip} as source IP\n");
             Ok(ip)
         }
-        Err(e) => {
-            write_error!("Error parsing source IP: {e}\n");
-            Err(e.into())
-        }
+        Err(e) => Err(anyhow::Error::new(e).context("Error parsing source IP")),
     }
 }
 
@@ -329,7 +325,7 @@ async fn load_servers(
             if buf.len() as u64 > MAX_LOCAL_JSON {
                 anyhow::bail!("server list from stdin exceeds {MAX_LOCAL_JSON} bytes");
             }
-            buf
+            bytes::Bytes::from(buf)
         }
         Some(path) => {
             write_ui!("Using local JSON server list: {path}\n");
@@ -341,14 +337,17 @@ async fn load_servers(
             if buf.len() as u64 > MAX_LOCAL_JSON {
                 anyhow::bail!("{path} exceeds {MAX_LOCAL_JSON} bytes");
             }
-            buf
+            bytes::Bytes::from(buf)
         }
         None => {
             let server_url = cli.server_json.as_deref().unwrap_or(SERVER_LIST_URL);
             write_ui!("Retrieving server list from {server_url}\n");
 
-            match fetch_server_list(client, server_url).await {
-                Ok(b) => b,
+            // The whole load is retried, not just the request: a list that
+            // arrives but does not parse, or holds none of the requested
+            // servers, sends the Go client to the discovery endpoint too.
+            return match fetch_servers(client, server_url, cli, force_scheme, filter).await {
+                Ok(servers) => Ok(servers),
                 Err(_) => {
                     // The discovery endpoint lives at the site root; appending
                     // it to the full list URL would ask for
@@ -364,11 +363,11 @@ async fn load_servers(
                         .unwrap_or_else(|_| format!("{server_url}/.well-known/librespeed"));
 
                     write_ui!("Retry with /.well-known/librespeed\n");
-                    fetch_server_list(client, &retry)
+                    fetch_servers(client, &retry, cli, force_scheme, filter)
                         .await
-                        .context("Error when fetching server list")?
+                        .context("Error when fetching server list")
                 }
-            }
+            };
         }
     };
 
@@ -378,13 +377,23 @@ async fn load_servers(
     preprocess_servers(servers, force_scheme, &cli.exclude, &cli.server, filter)
 }
 
-async fn fetch_server_list(client: &HttpClient, url: &str) -> anyhow::Result<Vec<u8>> {
+/// Fetches a server list and applies the scheme rules and filters to it.
+async fn fetch_servers(
+    client: &HttpClient,
+    url: &str,
+    cli: &Cli,
+    force_scheme: ForceScheme,
+    filter: bool,
+) -> anyhow::Result<Vec<Server>> {
     let url = url::Url::parse(url).with_context(|| format!("invalid server list URL: {url}"))?;
     let (status, body) = client.get_bytes(&url).await?;
     if !status.is_success() {
         anyhow::bail!("server list request returned HTTP {status}");
     }
-    Ok(body.to_vec())
+    // Parsed from the bytes as they came off the wire, so a hostile list does
+    // not get to be held twice.
+    let servers: Vec<Server> = serde_json::from_slice(&body)?;
+    preprocess_servers(servers, force_scheme, &cli.exclude, &cli.server, filter)
 }
 
 /// Rewrites a server URL's scheme, as Go's `url.URL.Scheme` assignment does.
@@ -465,7 +474,7 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
             };
 
             // Check the server is up before spending time on a ping.
-            if !server.is_up(ctx.client, &tlog).await {
+            if !server.is_up(ctx.client, &tlog).await.up {
                 write_debug!(
                     "Server {} ({}) doesn't seem to be up, skipping\n",
                     output::sanitize(&server.name),

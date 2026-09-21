@@ -3,17 +3,19 @@
 use clap::Parser;
 
 use librespeed_cli::cli::Cli;
-use librespeed_cli::{output, speedtest, write_error};
+use librespeed_cli::{output, speedtest};
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = speedtest::run(&cli).await {
-        // `{:#}` renders the whole error chain, so the underlying cause
-        // (DNS failure, refused connection, ...) is visible.
-        write_error!("{e:#}\n");
-        output::fatal("Terminated due to error");
+        // The whole chain, so the underlying cause (DNS failure, refused
+        // connection, ...) is visible, after the Go client's prefix.
+        output::fatal(format!(
+            "Terminated due to error: {}",
+            output::error_text(&e)
+        ));
     }
 
     // Exit rather than returning, so the process does not depend on the tokio

@@ -15,7 +15,7 @@ use url::Url;
 use crate::defs::bytes_counter::{random_data, BytesCounter};
 use crate::defs::telemetry::TelemetryLog;
 use crate::defs::GetIPResult;
-use crate::http::{empty_body, HttpClient, IpFamily, ReqBody};
+use crate::http::{HttpClient, IpFamily, RequestBody};
 use crate::ping::{compute_jitter, icmp_rtts, resolve_host};
 use crate::spinner::Spinner;
 use crate::util::{avg, stddev, url_join_path};
@@ -105,37 +105,64 @@ impl Server {
     }
 
     /// Checks the backend is up: the ping URL must return 200 and an empty body.
-    pub async fn is_up(&self, client: &HttpClient, tlog: &TelemetryLog) -> bool {
+    ///
+    /// Also reports what this probe's connection negotiated. The transfer
+    /// phases open further connections and a reconnect can land on a different
+    /// address, so this describes the probe, not necessarily every connection
+    /// the run went on to use; the Go client reports the same thing from the
+    /// same place.
+    pub async fn is_up(&self, client: &HttpClient, tlog: &TelemetryLog) -> ServerStatus {
         let t = Instant::now();
 
         let url = match self.get_url() {
             Ok(u) => url_join_path(&u, &self.ping_url),
             Err(e) => {
                 write_debug!("Failed when creating HTTP request: {e}\n");
-                return false;
+                return ServerStatus::default();
             }
         };
 
-        let result = client.get_bytes(&url).await;
+        // Enough of the body to tell empty from not, and to quote what came
+        // back; a backend answering the probe with megabytes used to make the
+        // client hold all of them, ten servers at a time.
+        let result = client.get_prefix(&url, PROBE_BODY_PEEK).await;
         tlog.logf(format!(
             "Check backend is up took {}",
             go_duration(t.elapsed())
         ));
 
         match result {
-            Ok((status, body)) => {
+            Ok((status, body, facts)) => {
+                // Say what the connection settled on. On hardware without AES
+                // acceleration the cipher, not the link, is what bounds the
+                // result, and under TLS 1.3 the server picks it from the set
+                // offered, so two runs can differ several-fold for a reason
+                // the numbers alone do not show.
+                match (&facts.tls, url.scheme()) {
+                    (Some(t), _) => {
+                        write_debug!("Negotiated {} with {}\n", t.version, t.cipher)
+                    }
+                    (None, "https") => write_debug!(
+                        "Connection is encrypted, but this TLS backend does not report with what\n"
+                    ),
+                    (None, _) => write_debug!("Connection is not encrypted\n"),
+                }
+
                 if !body.is_empty() {
                     write_debug!(
                         "Failed when parsing get IP result: {}\n",
                         crate::output::sanitize(&String::from_utf8_lossy(&body))
                     );
-                    return false;
+                    return ServerStatus::default();
                 }
-                status == StatusCode::OK
+                ServerStatus {
+                    up: status == StatusCode::OK,
+                    tls: facts.tls,
+                }
             }
             Err(e) => {
                 write_debug!("Error checking for server status: {e:#}\n");
-                false
+                ServerStatus::default()
             }
         }
     }
@@ -194,10 +221,29 @@ impl Server {
         let url = url_join_path(&self.get_url()?, &self.ping_url);
         let mut pings = Vec::with_capacity(count);
 
+        // Collect every distinct peer, not just the first. The requests
+        // usually share one connection, but a reconnect can land on a
+        // different address -- a different family, even -- and reporting only
+        // the first would describe a connection the later samples did not use.
+        let mut remotes: Vec<std::net::SocketAddr> = Vec::new();
         for _ in 0..count {
             let start = Instant::now();
-            client.get_bytes(&url).await?;
+            // The reply is timing, not data: read it away rather than into
+            // memory, as the Go client does.
+            let (_, facts) = client.get_drained(&url).await?;
             pings.push(start.elapsed().as_secs_f64() * 1000.0);
+            if let Some(peer) = facts.peer {
+                if !remotes.contains(&peer) {
+                    remotes.push(peer);
+                }
+            }
+        }
+
+        for addr in &remotes {
+            write_debug!(
+                "Pinging {addr} over TCP ({})\n",
+                if addr.is_ipv4() { "IPv4" } else { "IPv6" }
+            );
         }
 
         // Discard the first sample, which carries the handshake overhead.
@@ -509,6 +555,16 @@ fn format_rate(label: &str, use_bytes: bool, counter: &BytesCounter) -> String {
     }
 }
 
+/// How much of a probe response is worth keeping to quote in a diagnostic.
+const PROBE_BODY_PEEK: usize = 8 * 1024;
+
+/// Whether a backend answered its probe, and what that connection negotiated.
+#[derive(Debug, Default)]
+pub struct ServerStatus {
+    pub up: bool,
+    pub tls: Option<crate::http::TlsFacts>,
+}
+
 /// Why a transfer stream ended, which decides whether it is replaced.
 ///
 /// A stream that carried data and then broke is replaced, so the phase keeps
@@ -532,7 +588,7 @@ impl StreamEnd {
 /// Downloads once, counting every byte received.
 async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>) -> StreamEnd {
     let deadline = stream_deadline(&client);
-    let resp = match send_request(&client, deadline, Method::GET, &url, empty_body).await {
+    let resp = match send_request(&client, deadline, Method::GET, &url, RequestBody::Empty).await {
         Ok(resp) => resp,
         Err(end) => return end,
     };
@@ -571,22 +627,24 @@ async fn upload_once(
     counter: Arc<BytesCounter>,
 ) -> StreamEnd {
     let deadline = stream_deadline(&client);
-    let mk_body = || {
-        BodyExt::boxed(upload_body::UploadBody::new(
-            payload.clone(),
-            counter.clone(),
-        ))
-    };
-    let resp = match send_request(&client, deadline, Method::POST, &url, mk_body).await {
+    let body = RequestBody::Stream(BodyExt::boxed(upload_body::UploadBody::new(
+        payload, counter,
+    )));
+    let resp = match send_request(&client, deadline, Method::POST, &url, body).await {
         Ok(resp) => resp,
         Err(end) => return end,
     };
 
-    // Drain the response so the connection can be reused.
+    // Discard the response frame by frame so the connection can be reused.
+    // Collecting it instead retained whatever the server chose to send, per
+    // stream, for the whole test -- the one body read here with no cap.
     let read = async {
-        if let Err(e) = resp.into_body().collect().await {
-            write_debug!("Failed when reading HTTP response: {e}\n");
-            return StreamEnd::TransferFailed;
+        let mut body = resp.into_body();
+        while let Some(frame) = body.frame().await {
+            if let Err(e) = frame {
+                write_debug!("Failed when reading HTTP response: {e}\n");
+                return StreamEnd::TransferFailed;
+            }
         }
         StreamEnd::Completed
     };
@@ -623,17 +681,14 @@ async fn within<T>(
 /// For an upload that span normally covers sending the whole body. The Go
 /// client draws the line in the same place: its client timeout firing inside
 /// `Do` is a request error it does not respawn after.
-async fn send_request<F>(
+async fn send_request(
     client: &HttpClient,
     deadline: Option<tokio::time::Instant>,
     method: Method,
     url: &Url,
-    mk_body: F,
-) -> Result<Response<Incoming>, StreamEnd>
-where
-    F: Fn() -> ReqBody,
-{
-    match within(deadline, client.send_streaming(method, url, mk_body)).await {
+    body: RequestBody,
+) -> Result<Response<Incoming>, StreamEnd> {
+    match within(deadline, client.send_streaming(method, url, body)).await {
         Some(Ok(resp)) => Ok(resp),
         Some(Err(e)) => {
             write_debug!("Failed when making HTTP request: {e}\n");

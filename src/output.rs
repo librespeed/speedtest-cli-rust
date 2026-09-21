@@ -128,6 +128,15 @@ pub fn write_ui_blank() {
     _err(format_args!("\n"));
 }
 
+/// Renders an error chain as one line, made safe to print.
+///
+/// The chain can carry text that came off the wire -- a server name inside a
+/// parse error, a response body -- and these lines are printed whether or not
+/// --debug is set.
+pub fn error_text(e: &anyhow::Error) -> String {
+    sanitize(&format!("{e:#}"))
+}
+
 /// Strips control characters from a string so it can be printed without
 /// letting a remote party drive the terminal.
 ///

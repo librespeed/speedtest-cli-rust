@@ -562,3 +562,47 @@ fn mutually_exclusive_options_are_rejected() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
     }
 }
+
+// A list that arrives but does not parse sends the Go client to the discovery
+// endpoint, just as a request that fails outright does.
+#[test]
+fn an_unparseable_remote_list_is_retried_at_the_discovery_endpoint() {
+    let backend = MockBackend::start();
+    let out = run(&[
+        "--server-json",
+        &format!("{}/garbage.php", backend.url()),
+        "--list",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Retry with /.well-known/librespeed\n"),
+        "{stderr}"
+    );
+}
+
+// A step that fails mid-run is reported as the Go client reports it: the step
+// and its cause, then the cause alone as the reason the run ended.
+#[test]
+fn a_failed_step_is_reported_with_its_cause() {
+    let path = std::env::temp_dir().join("librespeed-cli-test-bad-url.json");
+    std::fs::write(
+        &path,
+        r#"[{"name":"Bad","server":"http://[not-an-address","id":1,"dlURL":"garbage.php","ulURL":"empty.php","pingURL":"empty.php","getIpURL":"getIP.php","sponsorName":"","sponsorURL":""}]"#,
+    )
+    .expect("write server list");
+
+    let out = run(&["--local-json", path.to_str().unwrap(), "--server", "1"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    let cause = lines
+        .iter()
+        .find_map(|l| l.strip_prefix("Failed to get server URL: "))
+        .unwrap_or_else(|| panic!("no step line in {stderr}"));
+    assert_eq!(
+        lines.last().copied(),
+        Some(format!("Terminated due to error: {cause}").as_str()),
+        "{stderr}"
+    );
+}
