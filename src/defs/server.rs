@@ -16,9 +16,11 @@ use crate::defs::bytes_counter::{random_data, BytesCounter};
 use crate::defs::telemetry::TelemetryLog;
 use crate::defs::GetIPResult;
 use crate::http::{HttpClient, IpFamily, RequestBody};
+use crate::output::Output;
 use crate::ping::{compute_jitter, icmp_rtts, resolve_host};
+use crate::quote::GoQuote;
 use crate::spinner::Spinner;
-use crate::util::{avg, stddev, url_join_path};
+use crate::util::{avg, go_duration, stddev, url_join_path};
 use crate::{write_debug, write_ui};
 
 /// The stagger between starting concurrent transfer streams.
@@ -54,7 +56,7 @@ pub struct Server {
 /// Settings shared by the download and upload tests.
 #[derive(Debug, Clone)]
 pub struct TransferOptions {
-    pub silent: bool,
+    pub out: Output,
     pub use_bytes: bool,
     pub use_mebi: bool,
     pub requests: usize,
@@ -79,7 +81,7 @@ impl Server {
     }
 
     /// Renders the sponsor line shown in `--list` and before a test.
-    pub fn sponsor(&self) -> String {
+    pub fn sponsor(&self, out: Output) -> String {
         if self.sponsor_name.is_empty() {
             return String::new();
         }
@@ -96,6 +98,7 @@ impl Server {
             match Url::parse(&url) {
                 Ok(_) => msg.push_str(&format!(" @ {url}")),
                 Err(_) => write_debug!(
+                    out,
                     "Sponsor URL is invalid: {}\n",
                     crate::output::sanitize(&self.sponsor_url)
                 ),
@@ -111,13 +114,18 @@ impl Server {
     /// address, so this describes the probe, not necessarily every connection
     /// the run went on to use; the Go client reports the same thing from the
     /// same place.
-    pub async fn is_up(&self, client: &HttpClient, tlog: &TelemetryLog) -> ServerStatus {
+    pub async fn is_up(
+        &self,
+        out: Output,
+        client: &HttpClient,
+        tlog: &TelemetryLog,
+    ) -> ServerStatus {
         let t = Instant::now();
 
         let url = match self.get_url() {
             Ok(u) => url_join_path(&u, &self.ping_url),
             Err(e) => {
-                write_debug!("Failed when creating HTTP request: {e}\n");
+                write_debug!(out, "Failed when creating HTTP request: {e}\n");
                 return ServerStatus::default();
             }
         };
@@ -140,18 +148,20 @@ impl Server {
                 // the numbers alone do not show.
                 match (&facts.tls, url.scheme()) {
                     (Some(t), _) => {
-                        write_debug!("Negotiated {} with {}\n", t.version, t.cipher)
+                        write_debug!(out, "Negotiated {} with {}\n", t.version, t.cipher)
                     }
                     (None, "https") => write_debug!(
+                        out,
                         "Connection is encrypted, but this TLS backend does not report with what\n"
                     ),
-                    (None, _) => write_debug!("Connection is not encrypted\n"),
+                    (None, _) => write_debug!(out, "Connection is not encrypted\n"),
                 }
 
                 if !body.is_empty() {
                     write_debug!(
+                        out,
                         "Failed when parsing get IP result: {}\n",
-                        crate::output::sanitize(&String::from_utf8_lossy(&body))
+                        GoQuote(&body)
                     );
                     return ServerStatus::default();
                 }
@@ -161,7 +171,7 @@ impl Server {
                 }
             }
             Err(e) => {
-                write_debug!("Error checking for server status: {e:#}\n");
+                write_debug!(out, "Error checking for server status: {e:#}\n");
                 ServerStatus::default()
             }
         }
@@ -170,6 +180,7 @@ impl Server {
     /// Fetches the client's IP information from the backend's getIP endpoint.
     pub async fn get_ip_info(
         &self,
+        out: Output,
         client: &HttpClient,
         tlog: &TelemetryLog,
         distance_unit: &str,
@@ -192,11 +203,8 @@ impl Server {
         match serde_json::from_slice::<GetIPResult>(&body) {
             Ok(v) => info = v,
             Err(e) => {
-                write_debug!("Failed when parsing get IP result: {e}\n");
-                write_debug!(
-                    "Received payload: {}\n",
-                    crate::output::sanitize(&String::from_utf8_lossy(&body))
-                );
+                write_debug!(out, "Failed when parsing get IP result: {e}\n");
+                write_debug!(out, "Received payload: {}\n", GoQuote(&body));
 
                 // Reached when the body is not JSON at all, or is JSON that
                 // does not fit the schema -- a non-string processedString,
@@ -212,6 +220,7 @@ impl Server {
     /// Measures latency and jitter by repeatedly fetching the ping URL.
     pub async fn ping_and_jitter(
         &self,
+        out: Output,
         client: &HttpClient,
         tlog: &TelemetryLog,
         count: usize,
@@ -241,6 +250,7 @@ impl Server {
 
         for addr in &remotes {
             write_debug!(
+                out,
                 "Pinging {addr} over TCP ({})\n",
                 if addr.is_ipv4() { "IPv4" } else { "IPv6" }
             );
@@ -260,6 +270,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     pub async fn icmp_ping_and_jitter(
         &self,
+        out: Output,
         client: &HttpClient,
         tlog: &TelemetryLog,
         count: usize,
@@ -270,10 +281,11 @@ impl Server {
     ) -> anyhow::Result<(f64, f64)> {
         if no_icmp {
             write_debug!(
+                out,
                 "Skipping ICMP for server {}, will use HTTP ping\n",
                 crate::output::sanitize(&self.name)
             );
-            return self.ping_and_jitter(client, tlog, count + 2).await;
+            return self.ping_and_jitter(out, client, tlog, count + 2).await;
         }
 
         let t = Instant::now();
@@ -285,28 +297,29 @@ impl Server {
         let target = match resolve_host(host, family).await {
             Ok(t) => t,
             Err(e) => {
-                write_debug!("Failed to resolve ping target: {e}\n");
-                write_debug!("Will try TCP ping\n");
-                return self.ping_and_jitter(client, tlog, count + 2).await;
+                write_debug!(out, "Failed to resolve ping target: {e}\n");
+                write_debug!(out, "Will try TCP ping\n");
+                return self.ping_and_jitter(out, client, tlog, count + 2).await;
             }
         };
 
         let rtts = match icmp_rtts(target, count, source, interface).await {
             Ok(r) => r,
             Err(e) => {
-                write_debug!("Failed to ping target host: {e}\n");
-                write_debug!("Will try TCP ping\n");
-                return self.ping_and_jitter(client, tlog, count + 2).await;
+                write_debug!(out, "Failed to ping target host: {e}\n");
+                write_debug!(out, "Will try TCP ping\n");
+                return self.ping_and_jitter(out, client, tlog, count + 2).await;
             }
         };
 
         if rtts.is_empty() {
             write_debug!(
+                out,
                 "No ICMP pings returned for server {} ({}), trying TCP ping\n",
                 crate::output::sanitize(&self.name),
                 crate::output::sanitize(host)
             );
-            return self.ping_and_jitter(client, tlog, count + 2).await;
+            return self.ping_and_jitter(out, client, tlog, count + 2).await;
         }
 
         // Say which address the test actually reached. IPv4 and IPv6 can take
@@ -314,6 +327,7 @@ impl Server {
         // described by the hostname it was measured against, and --json carries
         // no client address to infer it from.
         write_debug!(
+            out,
             "Pinging {} over ICMP ({})\n",
             target,
             if target.is_ipv4() { "IPv4" } else { "IPv6" }
@@ -326,6 +340,7 @@ impl Server {
         // so a percentage would say more about the server's ICMP handling than
         // about the network.
         write_debug!(
+            out,
             "Ping over ICMP: min {:.2} ms, avg {:.2} ms, max {:.2} ms, stddev {:.2} ms, {}/{} replies\n",
             rtts.iter().copied().fold(f64::INFINITY, f64::min),
             avg(&rtts),
@@ -348,6 +363,7 @@ impl Server {
         opts: &TransferOptions,
     ) -> anyhow::Result<(f64, u64)> {
         let t = Instant::now();
+        let out = opts.out;
 
         let mut counter = BytesCounter::new();
         counter.set_mebi(opts.use_mebi);
@@ -362,7 +378,12 @@ impl Server {
 
         let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
-            tasks.spawn(download_once(client.clone(), url.clone(), counter.clone()));
+            tasks.spawn(download_once(
+                out,
+                client.clone(),
+                url.clone(),
+                counter.clone(),
+            ));
             tokio::time::sleep(RAMP_UP_DELAY).await;
         }
 
@@ -372,7 +393,8 @@ impl Server {
         // as the Go client's does, so every average it reports, the final one
         // included, divides by the ramp-up as well.
         let test_start = Instant::now();
-        let ticker = Self::start_progress_ticker("download", &counter, opts.duration, test_start);
+        let ticker =
+            Self::start_progress_ticker(out, "download", &counter, opts.duration, test_start);
         // Only the deadline ends the phase. Draining the set used to end it
         // too, so a link that broke every connection finished the test in
         // under a second and divided its bytes by that, reporting a rate many
@@ -385,7 +407,12 @@ impl Server {
                 _ = tokio::time::sleep_until(deadline) => break,
                 Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                     if matches!(res, Ok(end) if end.replaceable()) {
-                        tasks.spawn(download_once(client.clone(), url.clone(), counter.clone()));
+                        tasks.spawn(download_once(
+                            out,
+                            client.clone(),
+                            url.clone(),
+                            counter.clone(),
+                        ));
                     }
                 }
             }
@@ -394,7 +421,7 @@ impl Server {
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
         if let Some(ticker) = ticker {
-            ticker.abort();
+            ticker.stop().await;
         }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
@@ -417,6 +444,7 @@ impl Server {
         opts: &TransferOptions,
     ) -> anyhow::Result<(f64, u64)> {
         let t = Instant::now();
+        let out = opts.out;
 
         let mut counter = BytesCounter::new();
         counter.set_mebi(opts.use_mebi);
@@ -426,7 +454,10 @@ impl Server {
         // Pre-allocating one random blob and reusing it keeps the CPU out of the
         // measurement; --no-pre-allocate streams endless random data instead.
         let payload = if opts.no_prealloc {
-            write_ui!("Pre-allocation is disabled, performance might be lower!\n");
+            write_ui!(
+                out,
+                "Pre-allocation is disabled, performance might be lower!\n"
+            );
             None
         } else {
             Some(Bytes::from(random_data(counter.upload_size())))
@@ -443,6 +474,7 @@ impl Server {
         let mut tasks: JoinSet<StreamEnd> = JoinSet::new();
         for _ in 0..opts.requests {
             tasks.spawn(upload_once(
+                out,
                 client.clone(),
                 url.clone(),
                 payload.clone(),
@@ -457,7 +489,8 @@ impl Server {
         // as the Go client's does, so every average it reports, the final one
         // included, divides by the ramp-up as well.
         let test_start = Instant::now();
-        let ticker = Self::start_progress_ticker("upload", &counter, opts.duration, test_start);
+        let ticker =
+            Self::start_progress_ticker(out, "upload", &counter, opts.duration, test_start);
         // Only the deadline ends the phase; see the download loop.
         let deadline = tokio::time::Instant::now() + opts.duration;
         loop {
@@ -467,6 +500,7 @@ impl Server {
                 Some(res) = tasks.join_next(), if !tasks.is_empty() => {
                     if matches!(res, Ok(end) if end.replaceable()) {
                         tasks.spawn(upload_once(
+                            out,
                             client.clone(),
                             url.clone(),
                             payload.clone(),
@@ -480,7 +514,7 @@ impl Server {
         // reading the counter, so the reported total cannot change under us.
         tasks.shutdown().await;
         if let Some(ticker) = ticker {
-            ticker.abort();
+            ticker.stop().await;
         }
 
         let (mbps, total) = (counter.avg_mbps(), counter.total());
@@ -498,32 +532,56 @@ impl Server {
     ///
     /// The machine-readable sibling of the spinner: the spinner narrates to a
     /// person on stderr, this reports to a script on stdout, and both read the
-    /// same counter. Aborted -- not joined -- when the transfer ends, since a
-    /// sleeping tick holds nothing worth waiting for.
+    /// same counter.
     fn start_progress_ticker(
+        out: Output,
         phase: &'static str,
         counter: &Arc<BytesCounter>,
         duration: Duration,
         started: Instant,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        if !crate::output::is_stream() {
+    ) -> Option<ProgressTicker> {
+        if !out.stream {
             return None;
         }
         let counter = counter.clone();
-        Some(tokio::spawn(async move {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let wait_for_stop = stop.clone();
+        let handle = tokio::spawn(async move {
+            // A ticker, not a sleep loop: sleeping a second between events
+            // adds each event's own cost to the next interval, so the events
+            // drift away from the seconds they claim to report.
+            let period = Duration::from_secs(1);
+            let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // A tick the task was too busy to take is dropped, and the next
+            // one lands on the original schedule, rather than firing a burst
+            // to catch up.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::select! {
+                    biased;
+                    _ = wait_for_stop.notified() => return,
+                    _ = ticker.tick() => {}
+                }
                 let elapsed = started.elapsed().as_secs_f64();
                 // A speed test is bounded by time, not by volume, so percent
                 // done is elapsed over the configured duration -- exact, and
-                // the only notion of "how much is left" the test has.
-                let percent = (elapsed / duration.as_secs_f64() * 100.0).min(100.0);
-                crate::output::stream_event(&format!(
-                    r#"{{"event":"progress","phase":"{phase}","seconds":{elapsed:.1},"mbps":{:.2},"progress":{percent:.0}}}"#,
-                    counter.avg_mbps()
-                ));
+                // the only notion of "how much is left" the test has. It is
+                // truncated, so the run reads 99 until the window is over.
+                let percent = (elapsed / duration.as_secs_f64() * 100.0).min(100.0) as u32;
+                let event = crate::report::ProgressEvent {
+                    event: "progress",
+                    phase,
+                    seconds: (elapsed * 10.0).round() / 10.0,
+                    mbps: (counter.avg_mbps() * 100.0).round() / 100.0,
+                    progress: percent,
+                };
+                match serde_json::to_string(&event) {
+                    Ok(line) => out.stream_event(&line),
+                    Err(e) => crate::write_error!("Error generating stream event: {e}\n"),
+                }
             }
-        }))
+        });
+        Some(ProgressTicker { stop, handle })
     }
 
     fn start_transfer_spinner(
@@ -532,12 +590,12 @@ impl Server {
         opts: &TransferOptions,
         counter: &Arc<BytesCounter>,
     ) -> Option<Spinner> {
-        if opts.silent {
+        if opts.out.quiet {
             return None;
         }
         let counter = counter.clone();
         let use_bytes = opts.use_bytes;
-        Some(Spinner::start(prefix, move || {
+        Some(Spinner::start(opts.out, prefix, move || {
             if use_bytes {
                 format!("  {}", counter.avg_humanize())
             } else {
@@ -565,6 +623,21 @@ pub struct ServerStatus {
     pub tls: Option<crate::http::TlsFacts>,
 }
 
+/// A running `--json-stream` progress ticker.
+struct ProgressTicker {
+    stop: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ProgressTicker {
+    /// Ends the ticker and waits for it, so a late progress event can never
+    /// land after the phase event that follows it.
+    async fn stop(self) {
+        self.stop.notify_one();
+        let _ = self.handle.await;
+    }
+}
+
 /// Why a transfer stream ended, which decides whether it is replaced.
 ///
 /// A stream that carried data and then broke is replaced, so the phase keeps
@@ -586,9 +659,23 @@ impl StreamEnd {
 }
 
 /// Downloads once, counting every byte received.
-async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>) -> StreamEnd {
+async fn download_once(
+    out: Output,
+    client: HttpClient,
+    url: Url,
+    counter: Arc<BytesCounter>,
+) -> StreamEnd {
     let deadline = stream_deadline(&client);
-    let resp = match send_request(&client, deadline, Method::GET, &url, RequestBody::Empty).await {
+    let resp = match send_request(
+        out,
+        &client,
+        deadline,
+        Method::GET,
+        &url,
+        RequestBody::Empty,
+    )
+    .await
+    {
         Ok(resp) => resp,
         Err(end) => return end,
     };
@@ -603,7 +690,7 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
                     }
                 }
                 Err(e) => {
-                    write_debug!("Failed when reading HTTP response: {e}\n");
+                    write_debug!(out, "Failed when reading HTTP response: {e}\n");
                     return StreamEnd::TransferFailed;
                 }
             }
@@ -621,6 +708,7 @@ async fn download_once(client: HttpClient, url: Url, counter: Arc<BytesCounter>)
 
 /// Uploads once. The body counts itself as hyper takes it; see `UploadBody`.
 async fn upload_once(
+    out: Output,
     client: HttpClient,
     url: Url,
     payload: Option<Bytes>,
@@ -630,7 +718,7 @@ async fn upload_once(
     let body = RequestBody::Stream(BodyExt::boxed(upload_body::UploadBody::new(
         payload, counter,
     )));
-    let resp = match send_request(&client, deadline, Method::POST, &url, body).await {
+    let resp = match send_request(out, &client, deadline, Method::POST, &url, body).await {
         Ok(resp) => resp,
         Err(end) => return end,
     };
@@ -642,7 +730,7 @@ async fn upload_once(
         let mut body = resp.into_body();
         while let Some(frame) = body.frame().await {
             if let Err(e) = frame {
-                write_debug!("Failed when reading HTTP response: {e}\n");
+                write_debug!(out, "Failed when reading HTTP response: {e}\n");
                 return StreamEnd::TransferFailed;
             }
         }
@@ -682,6 +770,7 @@ async fn within<T>(
 /// client draws the line in the same place: its client timeout firing inside
 /// `Do` is a request error it does not respawn after.
 async fn send_request(
+    out: Output,
     client: &HttpClient,
     deadline: Option<tokio::time::Instant>,
     method: Method,
@@ -691,7 +780,7 @@ async fn send_request(
     match within(deadline, client.send_streaming(method, url, body)).await {
         Some(Ok(resp)) => Ok(resp),
         Some(Err(e)) => {
-            write_debug!("Failed when making HTTP request: {e}\n");
+            write_debug!(out, "Failed when making HTTP request: {e}\n");
             Err(StreamEnd::RequestFailed)
         }
         None => Err(StreamEnd::RequestFailed),
@@ -816,28 +905,6 @@ mod upload_body {
     }
 }
 
-/// Renders a duration the way Go's `time.Duration.String()` does, for telemetry logs.
-fn go_duration(d: Duration) -> String {
-    fn trim(s: String) -> String {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    }
-
-    let secs = d.as_secs_f64();
-    if secs >= 1.0 {
-        format!("{}s", trim(format!("{secs:.9}")))
-    } else if secs >= 1e-3 {
-        format!("{}ms", trim(format!("{:.6}", secs * 1e3)))
-    } else if secs >= 1e-6 {
-        format!("{}µs", trim(format!("{:.3}", secs * 1e6)))
-    } else {
-        format!("{}ns", d.as_nanos())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,7 +916,10 @@ mod tests {
             sponsor_url: "https://www.clouvider.co.uk/".into(),
             ..Default::default()
         };
-        assert_eq!(s.sponsor(), "Clouvider @ https://www.clouvider.co.uk/");
+        assert_eq!(
+            s.sponsor(Output::default()),
+            "Clouvider @ https://www.clouvider.co.uk/"
+        );
     }
 
     #[test]
@@ -859,18 +929,15 @@ mod tests {
             sponsor_url: "example.com".into(),
             ..Default::default()
         };
-        assert_eq!(s.sponsor(), "Example @ https://example.com");
+        assert_eq!(
+            s.sponsor(Output::default()),
+            "Example @ https://example.com"
+        );
     }
 
     #[test]
     fn sponsor_is_empty_without_a_name() {
-        assert_eq!(Server::default().sponsor(), "");
-    }
-
-    #[test]
-    fn go_duration_formats_like_go() {
-        assert_eq!(go_duration(Duration::from_millis(1500)), "1.5s");
-        assert_eq!(go_duration(Duration::from_micros(1500)), "1.5ms");
+        assert_eq!(Server::default().sponsor(Output::default()), "");
     }
 }
 
@@ -913,7 +980,13 @@ mod transfer_tests {
         let client = client_with_timeout(Duration::ZERO);
 
         let counter = Arc::new(BytesCounter::new());
-        let end = download_once(client.clone(), url.clone(), counter.clone()).await;
+        let end = download_once(
+            Output::default(),
+            client.clone(),
+            url.clone(),
+            counter.clone(),
+        )
+        .await;
         assert!(
             matches!(end, StreamEnd::Completed),
             "the download stream was cut short"
@@ -921,7 +994,7 @@ mod transfer_tests {
         assert_eq!(counter.total(), 4, "the whole response must be counted");
 
         let payload = Some(Bytes::from_static(&[0; 1024]));
-        let end = upload_once(client, url, payload, counter).await;
+        let end = upload_once(Output::default(), client, url, payload, counter).await;
         assert!(
             matches!(end, StreamEnd::Completed),
             "the upload stream was cut short"
@@ -949,7 +1022,10 @@ mod transfer_tests {
 
     fn opts(duration: Duration) -> TransferOptions {
         TransferOptions {
-            silent: true,
+            out: Output {
+                quiet: true,
+                ..Output::default()
+            },
             use_bytes: false,
             use_mebi: false,
             requests: 3,
@@ -1143,10 +1219,16 @@ mod transfer_tests {
         let client = client_with_timeout(Duration::from_millis(200));
         let counter = Arc::new(BytesCounter::new());
 
-        let end = download_once(client.clone(), url.clone(), counter.clone()).await;
+        let end = download_once(
+            Output::default(),
+            client.clone(),
+            url.clone(),
+            counter.clone(),
+        )
+        .await;
         assert_eq!(end, StreamEnd::RequestFailed, "download");
         let payload = Some(Bytes::from_static(&[0; 1024]));
-        let end = upload_once(client, url, payload, counter).await;
+        let end = upload_once(Output::default(), client, url, payload, counter).await;
         assert_eq!(end, StreamEnd::RequestFailed, "upload");
     }
 
@@ -1159,10 +1241,16 @@ mod transfer_tests {
         let client = client_with_timeout(Duration::from_millis(200));
         let counter = Arc::new(BytesCounter::new());
 
-        let end = download_once(client.clone(), url.clone(), counter.clone()).await;
+        let end = download_once(
+            Output::default(),
+            client.clone(),
+            url.clone(),
+            counter.clone(),
+        )
+        .await;
         assert_eq!(end, StreamEnd::TransferFailed, "download");
         let payload = Some(Bytes::from_static(&[0; 1024]));
-        let end = upload_once(client, url, payload, counter).await;
+        let end = upload_once(Output::default(), client, url, payload, counter).await;
         assert_eq!(end, StreamEnd::TransferFailed, "upload");
     }
 

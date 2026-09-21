@@ -10,6 +10,7 @@ pub mod helper;
 pub mod http;
 pub mod output;
 pub mod ping;
+pub mod quote;
 pub mod report;
 pub mod speedtest;
 pub mod spinner;

@@ -5,54 +5,55 @@
 //!   - stderr: human-readable UI (progress, errors, debugging)
 //!   - quiet mode: suppresses informational UI output (for --csv, --json, --simple)
 //!   - debug mode: enables verbose debug output (for --debug)
+//!
+//! Which of these a run wants is an `Output` value the caller passes down,
+//! not process-wide state.
 
 use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 
-static DEBUG: AtomicBool = AtomicBool::new(false);
-static QUIET: AtomicBool = AtomicBool::new(false);
-static STREAM: AtomicBool = AtomicBool::new(false);
-
-/// Enables or disables debug output. Called when --debug is set.
-pub fn set_debug(v: bool) {
-    DEBUG.store(v, Ordering::Relaxed);
-}
-
-/// Enables or disables quiet mode (suppresses `write_ui!`).
-/// Called when --csv, --json, or --simple is set.
-pub fn set_quiet(v: bool) {
-    QUIET.store(v, Ordering::Relaxed);
-}
-
-/// Enables NDJSON progress events on stdout (--json-stream).
-pub fn set_stream(v: bool) {
-    STREAM.store(v, Ordering::Relaxed);
-}
-
-/// Reports whether NDJSON progress events are enabled.
-pub fn is_stream() -> bool {
-    STREAM.load(Ordering::Relaxed)
-}
-
-/// Emits one NDJSON event line on stdout, when --json-stream is active.
+/// What a run prints: which of its messages are written, and where.
 ///
-/// Goes through the same locked, flushed path as write_out!, so an event is
-/// always a whole line: the consumer on the other side is a script reading
-/// line by line, and a torn event would be worse than a missing one.
-pub fn stream_event(json_line: &str) {
-    if is_stream() {
-        _out(format_args!("{json_line}\n"));
+/// Carried by value from the caller that decided it down to every line that
+/// prints, rather than kept in statics. This crate is also a library, so a
+/// second run in the same process used to inherit whatever the first one set
+/// and never cleared.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Output {
+    /// Verbose diagnostics on stderr (--debug).
+    pub debug: bool,
+    /// Informational UI suppressed (--csv, --json, --json-stream, --simple).
+    pub quiet: bool,
+    /// NDJSON progress events on stdout (--json-stream).
+    pub stream: bool,
+}
+
+impl Output {
+    /// Emits one NDJSON event line on stdout, when --json-stream is active.
+    ///
+    /// Goes through the same locked, flushed path as write_out!, so an event is
+    /// always a whole line: the consumer on the other side is a script reading
+    /// line by line, and a torn event would be worse than a missing one.
+    pub fn stream_event(&self, json_line: &str) {
+        if self.stream {
+            _out(format_args!("{json_line}\n"));
+        }
     }
-}
 
-/// Reports whether debug output is enabled.
-pub fn is_debug() -> bool {
-    DEBUG.load(Ordering::Relaxed)
-}
+    #[doc(hidden)]
+    pub fn _ui(&self, args: std::fmt::Arguments<'_>) {
+        if self.quiet {
+            return;
+        }
+        _err(args);
+    }
 
-/// Reports whether informational UI output is suppressed.
-pub fn is_quiet() -> bool {
-    QUIET.load(Ordering::Relaxed)
+    #[doc(hidden)]
+    pub fn _dbg(&self, args: std::fmt::Arguments<'_>) {
+        if !self.debug {
+            return;
+        }
+        _err(args);
+    }
 }
 
 /// Reports whether the UI stream (stderr) is an interactive terminal.
@@ -70,27 +71,11 @@ pub fn _out(args: std::fmt::Arguments<'_>) {
 }
 
 #[doc(hidden)]
-pub fn _ui(args: std::fmt::Arguments<'_>) {
-    if is_quiet() {
-        return;
-    }
-    _err(args);
-}
-
-#[doc(hidden)]
 pub fn _err(args: std::fmt::Arguments<'_>) {
     let stderr = std::io::stderr();
     let mut lock = stderr.lock();
     let _ = lock.write_fmt(args);
     let _ = lock.flush();
-}
-
-#[doc(hidden)]
-pub fn _dbg(args: std::fmt::Arguments<'_>) {
-    if !is_debug() {
-        return;
-    }
-    _err(args);
 }
 
 /// Writes formatted data to stdout.
@@ -105,13 +90,17 @@ macro_rules! write_out {
 /// Suppressed in quiet mode (--csv, --json, --simple).
 #[macro_export]
 macro_rules! write_ui {
-    ($($arg:tt)*) => { $crate::output::_ui(format_args!($($arg)*)) };
+    ($out:expr, $($arg:tt)*) => {
+        $crate::output::Output::_ui(&$out, format_args!($($arg)*))
+    };
 }
 
 /// Writes debug messages to stderr. Only shown when --debug is set.
 #[macro_export]
 macro_rules! write_debug {
-    ($($arg:tt)*) => { $crate::output::_dbg(format_args!($($arg)*)) };
+    ($out:expr, $($arg:tt)*) => {
+        $crate::output::Output::_dbg(&$out, format_args!($($arg)*))
+    };
 }
 
 /// Writes error messages to stderr. Always shown regardless of mode.

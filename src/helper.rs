@@ -1,7 +1,7 @@
 //! Runs the speed test against the selected servers and reports the results.
 
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use rand::Rng;
@@ -11,10 +11,30 @@ use crate::cli::Cli;
 use crate::defs::server::TransferOptions;
 use crate::defs::{GetIPResult, Server, TelemetryExtra, TelemetryLog, TelemetryServer};
 use crate::http::{HttpClient, IpFamily};
+use crate::output::Output;
 use crate::report::{self, CSVReport, Client, JSONReport, ReportServer};
 use crate::spinner::Spinner;
-use crate::util::round2;
-use crate::{output, write_error, write_out, write_ui};
+use crate::util::{go_duration, round2};
+use crate::{output, write_debug, write_error, write_out, write_ui};
+
+/// Renders an elapsed time the way the Go client logs one: `time.Duration`
+/// rounded to the millisecond, so a phase reads `3.001s` rather than
+/// `3.000841292s`.
+fn go_duration_ms(d: Duration) -> String {
+    go_duration(Duration::from_millis(
+        (d.as_secs_f64() * 1000.0).round() as u64
+    ))
+}
+
+/// Renders a rate for a debug line the way the report next to it renders one,
+/// so the two can never disagree.
+fn humanize_rate(mbps: f64, use_bytes: bool, use_mebi: bool) -> String {
+    if use_bytes {
+        humanize_mbps(mbps, use_mebi)
+    } else {
+        format!("{mbps:.2} Mbps")
+    }
+}
 
 /// The number of pings used to measure latency and jitter during a test.
 const PING_COUNT: usize = 10;
@@ -26,7 +46,7 @@ pub struct TestContext<'a> {
     pub family: IpFamily,
     pub source: Option<IpAddr>,
     pub no_icmp: bool,
-    pub silent: bool,
+    pub out: Output,
 }
 
 /// Where the actual speed test happens.
@@ -35,8 +55,9 @@ pub async fn do_speed_test(
     servers: &[Server],
     ctx: &TestContext<'_>,
 ) -> anyhow::Result<()> {
+    let out = ctx.out;
     if servers.len() > 1 {
-        write_ui!("Testing against {} servers\n", servers.len());
+        write_ui!(out, "Testing against {} servers\n", servers.len());
     }
 
     let delimiter = cli.csv_delimiter_byte()?;
@@ -54,51 +75,81 @@ pub async fn do_speed_test(
         let hostname = url.host_str().unwrap_or_default().to_string();
 
         write_ui!(
+            out,
             "Selected server: {} [{}]\n",
             output::sanitize(&current_server.name),
             output::sanitize(&hostname)
         );
 
-        let sponsor_msg = current_server.sponsor();
+        // The address as the list gave it: the URL parser would add the
+        // trailing slash the Go client's line does not have.
+        write_debug!(
+            out,
+            "Testing against {} ({})\n",
+            output::sanitize(&current_server.name),
+            output::sanitize(&current_server.server)
+        );
+
+        let sponsor_msg = current_server.sponsor(out);
         if !sponsor_msg.is_empty() {
-            write_ui!("Sponsored by: {}\n", output::sanitize(&sponsor_msg));
+            write_ui!(out, "Sponsored by: {}\n", output::sanitize(&sponsor_msg));
         }
 
-        let status = current_server.is_up(ctx.client, &tlog).await;
+        let status = current_server.is_up(out, ctx.client, &tlog).await;
         if !status.up {
             write_ui!(
+                out,
                 "Selected server {} ({}) is not responding at the moment, try again later\n",
                 output::sanitize(&current_server.name),
                 output::sanitize(&hostname)
             );
-            if servers.len() > 1 && !ctx.silent {
+            if servers.len() > 1 && !out.quiet {
                 output::write_ui_blank();
             }
             continue;
         }
 
+        write_debug!(out, "Fetching IP info\n");
         let isp_info = match current_server
-            .get_ip_info(ctx.client, &tlog, &cli.distance)
+            .get_ip_info(out, ctx.client, &tlog, &cli.distance)
             .await
         {
             Ok(i) => i,
             Err(e) => return Err(report_failure("Failed to get IP info", e)),
         };
         write_ui!(
+            out,
             "You're testing from: {}\n",
+            output::sanitize(&isp_info.processed_string)
+        );
+        write_debug!(
+            out,
+            "IP info: {}\n",
             output::sanitize(&isp_info.processed_string)
         );
 
         // Latency and jitter.
-        let spinner = if ctx.silent {
+        let spinner = if out.quiet {
             None
         } else {
-            Some(Spinner::start("Pinging server...  ", String::new))
+            Some(Spinner::start(out, "Pinging server...  ", String::new))
         };
 
-        output::stream_event(r#"{"event":"phase","phase":"ping"}"#);
+        // The spinner is the only sign of progress, and it is not started in
+        // silent mode, so --json, --csv and --simple runs otherwise show
+        // nothing at all until they finish. Report each phase under --debug
+        // instead, with the timings and counts the spinner cannot carry.
+        write_debug!(
+            out,
+            "Ping test starting: {} pings, ICMP: {}\n",
+            PING_COUNT,
+            !ctx.no_icmp
+        );
+        out.stream_event(r#"{"event":"phase","phase":"ping"}"#);
+        let ping_start = Instant::now();
         let ping_result = current_server
             .icmp_ping_and_jitter(
+                out,
                 ctx.client,
                 &tlog,
                 PING_COUNT,
@@ -119,13 +170,19 @@ pub async fn do_speed_test(
             }
         };
 
+        write_debug!(
+            out,
+            "Ping test finished in {}: ping {ping:.2} ms, jitter {jitter:.2} ms\n",
+            go_duration_ms(ping_start.elapsed())
+        );
+
         if let Some(s) = spinner {
             s.stop(&format!("Ping: {ping:.2} ms\tJitter: {jitter:.2} ms\n"))
                 .await;
         }
 
         let opts = TransferOptions {
-            silent: ctx.silent,
+            out,
             use_bytes: cli.bytes,
             use_mebi: cli.mebibytes,
             requests: cli.concurrent as usize,
@@ -137,26 +194,58 @@ pub async fn do_speed_test(
 
         // Download.
         let (download_value, bytes_read) = if cli.no_download {
-            write_ui!("Download test is disabled\n");
+            write_ui!(out, "Download test is disabled\n");
+            write_debug!(out, "Download test skipped\n");
             (0.0, 0)
         } else {
-            output::stream_event(r#"{"event":"phase","phase":"download"}"#);
-            match current_server.download(ctx.client, &tlog, &opts).await {
+            write_debug!(
+                out,
+                "Download test starting: {} stream(s), {} chunk(s), up to {}s\n",
+                cli.concurrent,
+                cli.chunks,
+                cli.duration
+            );
+            out.stream_event(r#"{"event":"phase","phase":"download"}"#);
+            let start = Instant::now();
+            let (mbps, bytes) = match current_server.download(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
                 Err(e) => return Err(report_failure("Failed to get download speed", e)),
-            }
+            };
+            write_debug!(
+                out,
+                "Download test finished in {}: {}, {bytes} byte(s) received\n",
+                go_duration_ms(start.elapsed()),
+                humanize_rate(mbps, cli.bytes, cli.mebibytes)
+            );
+            (mbps, bytes)
         };
 
         // Upload.
         let (upload_value, bytes_written) = if cli.no_upload {
-            write_ui!("Upload test is disabled\n");
+            write_ui!(out, "Upload test is disabled\n");
+            write_debug!(out, "Upload test skipped\n");
             (0.0, 0)
         } else {
-            output::stream_event(r#"{"event":"phase","phase":"upload"}"#);
-            match current_server.upload(ctx.client, &tlog, &opts).await {
+            write_debug!(
+                out,
+                "Upload test starting: {} stream(s), {} KiB per request, up to {}s\n",
+                cli.concurrent,
+                cli.upload_size,
+                cli.duration
+            );
+            out.stream_event(r#"{"event":"phase","phase":"upload"}"#);
+            let start = Instant::now();
+            let (mbps, bytes) = match current_server.upload(ctx.client, &tlog, &opts).await {
                 Ok(v) => v,
                 Err(e) => return Err(report_failure("Failed to get upload speed", e)),
-            }
+            };
+            write_debug!(
+                out,
+                "Upload test finished in {}: {}, {bytes} byte(s) sent\n",
+                go_duration_ms(start.elapsed()),
+                humanize_rate(mbps, cli.bytes, cli.mebibytes)
+            );
+            (mbps, bytes)
         };
 
         if cli.simple {
@@ -201,7 +290,7 @@ pub async fn do_speed_test(
                         if cli.simple {
                             write_out!("Share your result: {link}\n");
                         } else {
-                            write_ui!("Share your result: {link}\n");
+                            write_ui!(out, "Share your result: {link}\n");
                         }
                     }
                 }
@@ -249,7 +338,7 @@ pub async fn do_speed_test(
         }
 
         // Add a blank line after each test when testing multiple servers.
-        if servers.len() > 1 && !ctx.silent {
+        if servers.len() > 1 && !out.quiet {
             output::write_ui_blank();
         }
     }
@@ -262,12 +351,12 @@ pub async fn do_speed_test(
     } else if cli.json_stream {
         // The reports are the same array --json prints, wrapped as the final
         // event so a consumer needs one parser for the whole stream.
-        match serde_json::to_string(&reps_json) {
-            Ok(s) => output::stream_event(&format!(r#"{{"event":"result","reports":{s}}}"#)),
+        match report::to_go_json(&json_reports(&reps_json)) {
+            Ok(s) => out.stream_event(&format!(r#"{{"event":"result","reports":{s}}}"#)),
             Err(e) => write_error!("Error generating JSON report: {e}\n"),
         }
     } else if cli.json {
-        match serde_json::to_string(&reps_json) {
+        match report::to_go_json(&json_reports(&reps_json)) {
             // serde_json does not terminate its output, and a document that
             // ends mid-line makes a shell prompt land on top of it and leaves
             // line-oriented tools with an unterminated last line.
@@ -284,6 +373,15 @@ pub async fn do_speed_test(
 fn report_failure(what: &str, e: anyhow::Error) -> anyhow::Error {
     write_error!("{what}: {}\n", output::error_text(&e));
     e
+}
+
+/// The reports as JSON sees them: `null` when nothing was measured.
+///
+/// Go declares a nil slice, which marshals to `null`, and both clients exit 0
+/// even when every server failed -- so the document is the only signal that
+/// nothing happened, and a consumer testing for null must keep seeing it.
+fn json_reports(reports: &[JSONReport]) -> Option<&[JSONReport]> {
+    (!reports.is_empty()).then_some(reports)
 }
 
 /// Sends the result to the telemetry server and returns the share link.

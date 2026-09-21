@@ -764,6 +764,67 @@ fn help_carries_the_go_clients_option_texts() {
     assert!(flat.contains("--http2"), "{flat}");
 }
 
+// The debug log carries the Go client's lines and no others, and names the
+// address the server list gave rather than a re-serialised URL.
+#[test]
+fn debug_output_matches_the_go_clients_lines() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("debug");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "0",
+        "--json",
+        "--debug",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        stderr.contains(&format!("Testing against Mock debug ({})\n", backend.url())),
+        "{stderr}"
+    );
+    for absent in ["Loaded ", "server(s) responded", "Fastest:", "Probing "] {
+        assert!(
+            !stderr.contains(absent),
+            "{absent:?} is not a Go line: {stderr}"
+        );
+    }
+}
+
+// Picking the fastest server logs nothing of its own in the Go client: only
+// the probe of each server, then the test itself.
+#[test]
+fn server_selection_logs_only_the_go_clients_lines() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("select");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--no-icmp",
+        "--duration",
+        "0",
+        "--no-download",
+        "--no-upload",
+        "--json",
+        "--debug",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let expected = format!(
+        "Connection is not encrypted\nSkipping ICMP for server Mock select, will use HTTP ping\nPinging {} over TCP (IPv4)\nTesting against Mock select ({})\n",
+        backend.addr,
+        backend.url()
+    );
+    assert!(stderr.starts_with(&expected), "{stderr}");
+}
+
 // A list that arrives but does not parse sends the Go client to the discovery
 // endpoint, just as a request that fails outright does.
 #[test]

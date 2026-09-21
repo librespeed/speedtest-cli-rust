@@ -13,6 +13,7 @@ use crate::defs::{self, Server, TelemetryLog, TelemetryServer};
 use crate::helper::{self, TestContext};
 use crate::http::connector::resolve;
 use crate::http::{BindOptions, HttpClient, IpFamily, TlsSettings};
+use crate::output::Output;
 use crate::report;
 use crate::{output, write_debug, write_error, write_out, write_ui};
 
@@ -41,15 +42,13 @@ pub enum ForceScheme {
 
 /// Handles the speed test(s).
 pub async fn run(cli: &Cli) -> anyhow::Result<()> {
-    if cli.silent() {
-        output::set_quiet(true);
-    }
-    if cli.debug {
-        output::set_debug(true);
-    }
-    if cli.json_stream {
-        output::set_stream(true);
-    }
+    // Decided once here and handed down, so nothing about this run reaches
+    // the next one.
+    let out = Output {
+        debug: cli.debug,
+        quiet: cli.silent(),
+        stream: cli.json_stream,
+    };
 
     if cli.version {
         print_version();
@@ -90,7 +89,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     };
 
     let source = match &cli.source {
-        Some(s) => Some(parse_source(s, family).await?),
+        Some(s) => Some(parse_source(out, s, family).await?),
         None => None,
     };
 
@@ -128,7 +127,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         ForceScheme::Nothing
     };
 
-    let servers = match load_servers(cli, &client, force_scheme).await {
+    let servers = match load_servers(out, cli, &client, force_scheme).await {
         Ok(servers) => servers,
         Err(e) => {
             write_error!(
@@ -138,12 +137,11 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
             return Err(e);
         }
     };
-    write_debug!("Loaded {} server(s)\n", servers.len());
 
     // If --list is given, list all the servers fetched and exit.
     if cli.list {
         for svr in &servers {
-            let sponsor = svr.sponsor();
+            let sponsor = svr.sponsor(out);
             let sponsor_msg = if sponsor.is_empty() {
                 String::new()
             } else {
@@ -168,7 +166,7 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         family,
         source,
         no_icmp,
-        silent: cli.silent(),
+        out,
     };
 
     // If --server is given, test against all of them.
@@ -177,14 +175,9 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
     }
 
     // Otherwise select the fastest server from the list.
-    write_ui!("Selecting the fastest server based on ping\n");
+    write_ui!(out, "Selecting the fastest server based on ping\n");
 
-    write_debug!(
-        "Probing {} server(s), {PING_WORKERS} at a time\n",
-        servers.len()
-    );
     let ping_list = ping_all(&servers, &ctx).await;
-    write_debug!("{} server(s) responded\n", ping_list.len());
     if ping_list.is_empty() {
         output::fatal("No server is currently available, please try again later.");
     }
@@ -197,16 +190,6 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         .copied()
         .expect("ping list is not empty");
 
-    write_debug!(
-        "Fastest: {} ({}) at {:.2} ms\n",
-        output::sanitize(&servers[best_idx].name),
-        servers[best_idx].id,
-        ping_list
-            .iter()
-            .find(|(i, _)| *i == best_idx)
-            .map(|(_, p)| *p)
-            .unwrap_or_default()
-    );
     helper::do_speed_test(cli, std::slice::from_ref(&servers[best_idx]), &ctx).await
 }
 
@@ -308,7 +291,7 @@ fn apply_default(field: &mut String, flag: &Option<String>, default: &str) {
 }
 
 /// Parses `--source` into an address of the requested family.
-async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
+async fn parse_source(out: Output, src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
     if let Ok(ip) = IpAddr::from_str(src) {
         let ok = match family {
             IpFamily::Any => true,
@@ -323,14 +306,14 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
             };
             anyhow::bail!("Address {src} is not a valid {want} address");
         }
-        write_debug!("Using {src} as source IP\n");
+        write_debug!(out, "Using {src} as source IP\n");
         return Ok(ip);
     }
 
     match resolve(src, 0, family).await {
         Ok(addrs) => {
             let ip = addrs[0].ip();
-            write_debug!("Using {ip} as source IP\n");
+            write_debug!(out, "Using {ip} as source IP\n");
             Ok(ip)
         }
         Err(e) => Err(anyhow::Error::new(e).context("Error parsing source IP")),
@@ -339,6 +322,7 @@ async fn parse_source(src: &str, family: IpFamily) -> anyhow::Result<IpAddr> {
 
 /// Loads the server list from the configured source.
 async fn load_servers(
+    out: Output,
     cli: &Cli,
     client: &HttpClient,
     force_scheme: ForceScheme,
@@ -347,7 +331,7 @@ async fn load_servers(
 
     let raw = match &cli.local_json {
         Some(path) if path == "-" => {
-            write_ui!("Using local JSON server list from stdin\n");
+            write_ui!(out, "Using local JSON server list from stdin\n");
             let mut buf = Vec::new();
             std::io::Read::take(std::io::stdin(), MAX_LOCAL_JSON + 1)
                 .read_to_end(&mut buf)
@@ -358,12 +342,12 @@ async fn load_servers(
             bytes::Bytes::from(buf)
         }
         Some(path) => {
-            write_ui!("Using local JSON server list: {path}\n");
+            write_ui!(out, "Using local JSON server list: {path}\n");
             bytes::Bytes::from(read_file(path, MAX_LOCAL_JSON).map_err(|e| anyhow::anyhow!(e))?)
         }
         None => {
             let server_url = cli.server_json.as_deref().unwrap_or(SERVER_LIST_URL);
-            write_ui!("Retrieving server list from {server_url}\n");
+            write_ui!(out, "Retrieving server list from {server_url}\n");
 
             // The whole load is retried, not just the request: a list that
             // arrives but does not parse, or holds none of the requested
@@ -384,7 +368,7 @@ async fn load_servers(
                         })
                         .unwrap_or_else(|_| format!("{server_url}/.well-known/librespeed"));
 
-                    write_ui!("Retry with /.well-known/librespeed\n");
+                    write_ui!(out, "Retry with /.well-known/librespeed\n");
                     fetch_servers(client, &retry, cli, force_scheme, filter).await
                 }
             };
@@ -478,6 +462,7 @@ pub fn preprocess_servers(
 
 /// Pings every server, returning `(index, ping)` for those that responded.
 async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)> {
+    let out = ctx.out;
     stream::iter(servers.iter().enumerate())
         .map(|(idx, server)| async move {
             let tlog = TelemetryLog::new();
@@ -486,6 +471,7 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
                 Ok(u) => u.host_str().unwrap_or_default().to_string(),
                 Err(_) => {
                     write_debug!(
+                        out,
                         "Server URL is invalid for {} ({}), skipping\n",
                         output::sanitize(&server.name),
                         output::sanitize(&server.server)
@@ -495,8 +481,9 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
             };
 
             // Check the server is up before spending time on a ping.
-            if !server.is_up(ctx.client, &tlog).await.up {
+            if !server.is_up(out, ctx.client, &tlog).await.up {
                 write_debug!(
+                    out,
                     "Server {} ({}) doesn't seem to be up, skipping\n",
                     output::sanitize(&server.name),
                     output::sanitize(&hostname)
@@ -506,6 +493,7 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
 
             match server
                 .icmp_ping_and_jitter(
+                    out,
                     ctx.client,
                     &tlog,
                     1,
@@ -516,15 +504,10 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
                 )
                 .await
             {
-                Ok((ping, _)) => {
-                    write_debug!(
-                        "  {} ({hostname}) {ping:.2} ms\n",
-                        output::sanitize(&server.name)
-                    );
-                    Some((idx, ping))
-                }
+                Ok((ping, _)) => Some((idx, ping)),
                 Err(_) => {
                     write_debug!(
+                        out,
                         "Can't ping server {} ({}), skipping\n",
                         output::sanitize(&server.name),
                         output::sanitize(&hostname)

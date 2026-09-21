@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::output;
+use crate::output::{self, Output};
 
 /// The braille frames used by the Go version (`spinner.CharSets[11]`).
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -31,11 +31,11 @@ impl Spinner {
     /// Starts a spinner that renders `prefix`, a frame, and the current value of
     /// `suffix`. When stderr is not a terminal nothing is drawn, but `stop` still
     /// prints the final message.
-    pub fn start<F>(prefix: impl Into<String>, suffix: F) -> Self
+    pub fn start<F>(out: Output, prefix: impl Into<String>, suffix: F) -> Self
     where
         F: Fn() -> String + Send + 'static,
     {
-        let animated = output::ui_is_terminal() && !output::is_quiet();
+        let animated = output::ui_is_terminal() && !out.quiet;
         let running = Arc::new(AtomicBool::new(true));
         let stopped = Arc::new(Notify::new());
 
