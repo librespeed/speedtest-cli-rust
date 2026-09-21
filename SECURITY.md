@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Report suspected vulnerabilities through GitHub's [private vulnerability
-reporting](https://github.com/BKPepe/speedtest-cli-rust/security/advisories/new).
+reporting](https://github.com/librespeed/speedtest-cli-rust/security/advisories/new).
 Please do not open a public issue for anything exploitable.
 
 Include what you did, what happened, and what you expected. A reproducer —
