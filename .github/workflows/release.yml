@@ -31,7 +31,7 @@ jobs:
           # cross-built here. OpenWrt serves those targets instead: its rust
           # package builds std from source.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -54,7 +54,7 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           sha256sum "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: librespeed-cli-${{ matrix.target }}
           path: dist/*.tar.gz*
@@ -65,7 +65,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -73,7 +73,7 @@ jobs:
       - name: Collect checksums
         run: cat dist/*.sha256 > dist/SHA256SUMS && rm -f dist/*.sha256
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true

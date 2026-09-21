@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --verbose
@@ -28,7 +28,7 @@ jobs:
     name: Test with the OpenSSL backend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --no-default-features --features native-tls --verbose
@@ -37,10 +37,10 @@ jobs:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Keep this in step with rust-version in Cargo.toml. OpenWrt 24.10 ships
       # this toolchain, so it is the floor the package build actually needs.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
       - run: cargo check --all-targets --no-default-features --features native-tls
@@ -49,7 +49,7 @@ jobs:
     name: Fuzz targets build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --locked
@@ -61,7 +61,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -77,13 +77,13 @@ jobs:
       # it too and refuses to run against another one.
       LIBRESPEED_GO_COMMIT: b660d1e6c24f14fc93624538d9e73163e7784335
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: librespeed/speedtest-cli
           ref: ${{ env.LIBRESPEED_GO_COMMIT }}
           path: go-client
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go-client/go.mod
           cache-dependency-path: go-client/go.sum
@@ -114,12 +114,12 @@ jobs:
           - target: aarch64-unknown-linux-musl
             tls: vendored-openssl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cross --locked
       - run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.tls }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: librespeed-cli-${{ matrix.target }}-${{ matrix.tls }}
           path: target/${{ matrix.target }}/release/librespeed-cli
