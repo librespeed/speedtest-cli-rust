@@ -273,6 +273,84 @@ git -C go-client checkout "$GO_COMMIT"
 LIBRESPEED_GO_BIN=$PWD/go-client/librespeed-go cargo test --test parity
 ```
 
+## Releasing
+
+A release is a tag. Bump `version` in `Cargo.toml`, commit it, then:
+
+```sh
+git tag -a v0.1.2 -m "librespeed-cli 0.1.2"
+git push origin v0.1.2
+```
+
+The tag starts [release.yml](.github/workflows/release.yml), which runs in
+one chain and stops at the first step that fails:
+
+1. **Resolve the commit** turns the tag into a commit, once. Every step
+   after it is handed that commit instead of resolving the tag again, so a
+   tag that moves mid-release cannot split the run across two of them.
+2. **Checks** run [ci.yml](.github/workflows/ci.yml) against that commit:
+   tests on three platforms, both TLS backends, the minimum supported Rust
+   version, lint, the fuzz targets, the differential test against the Go
+   client and `cargo package`. Nothing is built or published until they
+   pass.
+3. **Package the crate** verifies the tag against `version` in `Cargo.toml`
+   and builds the `.crate` once, recording its SHA-256. A tag that disagrees
+   stops the run here, before a release exists to leave behind.
+4. **Build** cross-builds the musl binaries.
+5. **Publish release** attaches the tarballs and `SHA256SUMS` to a GitHub
+   release.
+6. **Publish to crates.io** checks the tag again against the commit it is
+   about to upload, rebuilds the crate and refuses to publish unless it comes
+   out byte for byte the one step 3 validated. `cargo` cannot upload a
+   `.crate` it did not just build, so this comparison is what ties the two
+   together. A dry run goes first, so a crate that cannot be published is
+   distinguishable from an upload that failed.
+
+Running the workflow by hand rebuilds the binaries for a tag that is already
+out; that path never publishes.
+
+The tag is checked again before the GitHub release is cut and once more
+immediately before the upload, because the approval on the `crates-io`
+environment can hold the run for hours. That is detection, not a lock: a tag
+can still move a moment after a check returns. Protecting `v*` tags against
+force-pushes and deletion with a repository ruleset is what prevents it, and
+these checks catch what slips past.
+
+Releases are built with the compiler named in `RELEASE_TOOLCHAIN`, with
+`cross` pinned to a version, and with every action pinned to a commit. CI
+keeps using whatever `stable` is that day: the two answer different
+questions, CI that the code has not fallen behind the compiler, a release
+what it was actually built with. Moving a release to a newer compiler is
+therefore a commit, not a Tuesday.
+
+That makes a release repeatable in the ways this repository controls: the
+same source, the same dependency versions from `Cargo.lock`, the same
+compiler, the same `cross` and the same actions. It does not make the
+binaries bit-for-bit reproducible — the `cross` container images and the
+runner environment are outside it. `SOURCE_DATE_EPOCH` only fixes the build
+date `--version` prints.
+
+### crates.io credentials
+
+One-time setup, and only the account that owns the crate can do it:
+
+1. Create an API token at <https://crates.io/settings/tokens> with the
+   `publish-new` and `publish-update` scopes, restricted to the
+   `librespeed-cli` crate. Once the first version is out, `publish-update`
+   alone is enough.
+2. Add an environment named `crates-io` under Settings → Environments and
+   store the token in it as the secret `CARGO_REGISTRY_TOKEN`. Required
+   reviewers on that environment make a release wait for an approval before
+   the token is handed out.
+
+This is the setup for the first release only. Trusted Publishing is where
+this should end up: crates.io mints a short-lived token for a workflow it
+trusts, so the publish job needs no stored secret at all — it gains
+`id-token: write` permission and takes its token from
+`rust-lang/crates-io-auth-action@v1`. It can only be configured for a crate
+that already exists, which is why the first version goes out with a token.
+Once `librespeed-cli` is on the registry, switch and delete the secret.
+
 ## License
 
 GNU Lesser General Public License v3.0, the same as the Go implementation. See
