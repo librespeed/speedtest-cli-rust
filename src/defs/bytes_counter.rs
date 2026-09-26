@@ -3,8 +3,6 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-use rand::RngCore;
-
 /// Tracks total bytes transferred and derives the average transfer rate.
 ///
 /// The total is a mutex rather than an `AtomicU64` because 32-bit targets such
@@ -110,6 +108,6 @@ impl Default for BytesCounter {
 /// faster for bulk data and the payload only needs to be incompressible.
 pub fn random_data(length: usize) -> Vec<u8> {
     let mut data = vec![0u8; length];
-    rand::thread_rng().fill_bytes(&mut data);
+    rand::fill(&mut data[..]);
     data
 }

@@ -4,7 +4,7 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use url::Url;
 
 use crate::cli::Cli;
@@ -438,9 +438,9 @@ async fn send_telemetry(
 /// Builds a `multipart/form-data` body, returning the content type and bytes.
 fn multipart_form(fields: &[(&str, &str)]) -> (String, Bytes) {
     let boundary: String = {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         (0..60)
-            .map(|_| char::from(b'a' + rng.gen_range(0..26)))
+            .map(|_| char::from(b'a' + rng.random_range(0..26)))
             .collect()
     };
 
