@@ -1,7 +1,9 @@
 //! Counts bytes transferred during the download and upload tests.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use crate::http::WriteMeter;
 
 /// Tracks total bytes transferred and derives the average transfer rate.
 ///
@@ -15,6 +17,16 @@ pub struct BytesCounter {
     start: Mutex<Option<Instant>>,
     mebi: bool,
     upload_size: usize,
+    /// The ceiling on the total, for the upload phase; see `set_wire`.
+    wire: Option<Wire>,
+}
+
+/// What a client's connections had written when a phase started, and the meter
+/// to ask again.
+#[derive(Debug)]
+struct Wire {
+    meter: Arc<WriteMeter>,
+    start: u64,
 }
 
 impl BytesCounter {
@@ -24,6 +36,7 @@ impl BytesCounter {
             start: Mutex::new(None),
             mebi: false,
             upload_size: 0,
+            wire: None,
         }
     }
 
@@ -41,6 +54,26 @@ impl BytesCounter {
         self.upload_size
     }
 
+    /// Caps the total at what `meter`'s connections write from now on.
+    ///
+    /// For the upload phase. Its total is body bytes counted as hyper takes
+    /// each frame, and hyper takes frames ahead of writing them, so without a
+    /// ceiling the total includes whatever is still queued -- hundreds of
+    /// kilobytes per connection, which is a quarter to a half of what a 1 Mbit
+    /// uplink carries in a whole test.
+    ///
+    /// The meter counts request heads and chunk framing along with body bytes,
+    /// so as a measure of body bytes written it is high by the overhead: a
+    /// head is 119 bytes for the request this client sends, and chunk framing
+    /// is 8 bytes per 16 KiB frame. That is the whole error this leaves -- the
+    /// total lands between what the connections wrote of the body and that
+    /// plus the overhead -- and a request the peer took whole is counted
+    /// exactly, its body bytes alone being fewer than head and body together.
+    pub fn set_wire(&mut self, meter: Arc<WriteMeter>) {
+        let start = meter.written();
+        self.wire = Some(Wire { meter, start });
+    }
+
     /// Starts the clock used for the average.
     pub fn start(&self) {
         *self.start.lock().unwrap() = Some(Instant::now());
@@ -51,9 +84,13 @@ impl BytesCounter {
         *self.total.lock().unwrap() += n;
     }
 
-    /// Total bytes read or written.
+    /// Total bytes read or written, at most what the wire ceiling allows.
     pub fn total(&self) -> u64 {
-        *self.total.lock().unwrap()
+        let counted = *self.total.lock().unwrap();
+        match &self.wire {
+            Some(wire) => counted.min(wire.meter.written().saturating_sub(wire.start)),
+            None => counted,
+        }
     }
 
     fn elapsed_secs(&self) -> f64 {
