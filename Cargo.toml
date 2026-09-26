@@ -78,7 +78,7 @@ hyper-tls = { version = "0.6", features = ["alpn"], optional = true }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 libc = "0.2"
 native-tls = { version = "0.2", features = ["alpn"], optional = true }
-rand = "0.8"
+rand = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 rustls-pki-types = { version = "1", optional = true }
