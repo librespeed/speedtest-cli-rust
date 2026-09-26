@@ -304,7 +304,8 @@ one chain and stops at the first step that fails:
    out byte for byte the one step 3 validated. `cargo` cannot upload a
    `.crate` it did not just build, so this comparison is what ties the two
    together. A dry run goes first, so a crate that cannot be published is
-   distinguishable from an upload that failed.
+   distinguishable from an upload that failed. Only then does the job ask
+   crates.io for a publishing token, through Trusted Publishing.
 
 Running the workflow by hand rebuilds the binaries for a tag that is already
 out; that path never publishes.
@@ -332,24 +333,33 @@ date `--version` prints.
 
 ### crates.io credentials
 
-One-time setup, and only the account that owns the crate can do it:
+There are none. The publish job authenticates with
+[Trusted Publishing](https://crates.io/docs/trusted-publishing): it asks
+GitHub for an OIDC token naming the repository and the workflow file, and
+`rust-lang/crates-io-auth-action` trades that with crates.io for a registry
+token that lasts 30 minutes and is revoked when the job ends. That is what
+`id-token: write` on the job is for; it grants nothing in this repository.
 
-1. Create an API token at <https://crates.io/settings/tokens> with the
-   `publish-new` and `publish-update` scopes, restricted to the
-   `librespeed-cli` crate. Once the first version is out, `publish-update`
-   alone is enough.
-2. Add an environment named `crates-io` under Settings → Environments and
-   store the token in it as the secret `CARGO_REGISTRY_TOKEN`. Required
-   reviewers on that environment make a release wait for an approval before
-   the token is handed out.
+The crate side is one-time setup, and only an owner of the crate can do it,
+under the crate's Settings → Trusted Publishing → Add, publisher GitHub:
 
-This is the setup for the first release only. Trusted Publishing is where
-this should end up: crates.io mints a short-lived token for a workflow it
-trusts, so the publish job needs no stored secret at all — it gains
-`id-token: write` permission and takes its token from
-`rust-lang/crates-io-auth-action@v1`. It can only be configured for a crate
-that already exists, which is why the first version goes out with a token.
-Once `librespeed-cli` is on the registry, switch and delete the secret.
+| Field | Value |
+| --- | --- |
+| Repository owner | `librespeed` |
+| Repository name | `speedtest-cli-rust` |
+| Workflow filename | `release.yml` |
+| Environment name | leave empty |
+
+The environment field is optional, and left empty it mints a token for any
+run of that workflow on this repository. Naming one would narrow that
+further, but only an environment with protection rules is worth the second
+place to keep in step, and configuring those needs repository admin.
+
+Trusted Publishing cannot be configured for a crate that does not exist yet,
+so the first version went out with an API token from
+<https://crates.io/settings/tokens>, stored on the `crates-io` environment as
+the secret `CARGO_REGISTRY_TOKEN`. Nothing reads that secret any more and it
+can be deleted.
 
 ## License
 
