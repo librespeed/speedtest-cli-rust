@@ -2,9 +2,11 @@
 //! (`--source`, `--interface`, `--fwmark`) can be honoured.
 
 pub mod connector;
+pub mod meter;
 pub mod tls;
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context as _};
@@ -19,6 +21,7 @@ use hyper_util::rt::TokioExecutor;
 use url::Url;
 
 pub use connector::{BindOptions, IpFamily};
+pub use meter::{MeteredConnector, WriteMeter};
 pub use tls::{TlsFacts, TlsSettings};
 
 /// What the transport negotiated for a request, read back off its response.
@@ -65,9 +68,6 @@ pub const MAX_TELEMETRY_RESPONSE: usize = 64 * 1024;
 /// understate any link faster than that.
 const H2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 const H2_CONNECTION_WINDOW: u32 = 1024 * 1024 * 1024;
-
-/// The cap on each HTTP/1 connection's buffers: hyper's minimum.
-pub(crate) const H1_MAX_BUF: usize = 8192;
 
 pub type ReqBody = BoxBody<Bytes, io::Error>;
 
@@ -174,27 +174,21 @@ async fn body_prefix(body: Incoming, limit: usize) -> anyhow::Result<Bytes> {
 
 /// The hyper client configuration `HttpClient` is built from.
 ///
-/// `bounded` caps a connection's HTTP/1 buffers, and only the upload pool asks
-/// for it. The upload total counts body frames as hyper takes them, so what
-/// hyper holds when the window closes was counted but never sent: with its
-/// default buffer, ~400 KB per connection, that overstated a 1 Mbit uplink by
-/// a quarter to a half. The cap is hyper's minimum, leaving 8 KiB and one
-/// frame. It binds the read buffer as well, which cost a 65 Gbit loopback
-/// download a fifth of its rate and would limit every response head to 8 KiB,
-/// so downloads, pings and the control-plane requests keep hyper's defaults.
+/// The HTTP/1 buffers are left at hyper's defaults, upload connections
+/// included. Capping them to hyper's minimum of 8 KiB used to be what kept the
+/// upload total honest -- a frame hyper has taken but not written was counted
+/// as sent, so the less it could hold, the less it could overstate. It cost a
+/// write syscall per 16 KiB frame, where uncapped hyper writes sixteen frames
+/// in one, and on plain HTTP that is most of the upload path's CPU. The
+/// ceiling in `meter` bounds the same error without bounding the buffers.
 pub(crate) fn client_builder(
     concurrent: usize,
     http2: bool,
-    bounded: bool,
 ) -> hyper_util::client::legacy::Builder {
     // Keep enough connections alive for every concurrent stream, matching the
     // Go version's MaxIdleConnsPerHost/MaxConnsPerHost tuning.
     let mut builder = Client::builder(TokioExecutor::new());
     builder.pool_max_idle_per_host(concurrent + 2);
-
-    if bounded {
-        builder.http1_max_buf_size(H1_MAX_BUF);
-    }
 
     if http2 {
         builder
@@ -207,9 +201,10 @@ pub(crate) fn client_builder(
 /// The program's HTTP client.
 #[derive(Clone)]
 pub struct HttpClient {
-    inner: Client<tls::Connector, ReqBody>,
-    /// The pool whose buffers are capped, for the upload test only.
-    upload: Client<tls::Connector, ReqBody>,
+    inner: Client<MeteredConnector<tls::Connector>, ReqBody>,
+    /// What this client's connections have written, which the upload total is
+    /// not allowed past; see `meter`.
+    wire: Arc<WriteMeter>,
     timeout: Duration,
     user_agent: HeaderValue,
 }
@@ -222,27 +217,24 @@ impl HttpClient {
         concurrent: usize,
         user_agent: &str,
     ) -> anyhow::Result<Self> {
-        let https = tls::build(bind, tls_settings)?;
-        let inner = client_builder(concurrent, tls_settings.http2, false).build(https.clone());
-        let upload = client_builder(concurrent, tls_settings.http2, true).build(https);
+        let wire = Arc::new(WriteMeter::new());
+        let https = MeteredConnector::new(tls::build(bind, tls_settings)?, wire.clone());
+        let inner = client_builder(concurrent, tls_settings.http2).build(https);
 
         Ok(Self {
             inner,
-            upload,
+            wire,
             timeout,
             user_agent: HeaderValue::from_str(user_agent)?,
         })
     }
 
-    /// The same client, sending over the pool whose buffers are capped.
+    /// What this client's connections have written so far.
     ///
-    /// Only the upload test wants that cap: it keeps what hyper has counted
-    /// but not sent small, and it costs a download speed.
-    pub fn for_uploads(&self) -> Self {
-        Self {
-            inner: self.upload.clone(),
-            ..self.clone()
-        }
+    /// The upload test takes this as the ceiling on what it may report as
+    /// sent, which is what lets the connections buffer freely; see `meter`.
+    pub fn wire(&self) -> Arc<WriteMeter> {
+        self.wire.clone()
     }
 
     /// The configured per-request timeout (`--timeout`).
@@ -1709,5 +1701,107 @@ ZD/4gnUj9TooNmtCjXdP4GAKxDoCb0FzQoHhDoi8BXY4DFLQYpbnX4Nu
             .await
             .expect("the connection was not closed")
             .unwrap();
+    }
+
+    /// Over TLS the meter counts what the TLS session accepted, which is what
+    /// makes it comparable with body bytes, and what it excludes is whatever
+    /// hyper is still holding.
+    ///
+    /// What it does not exclude is the transport below: rustls buffers 64 KiB
+    /// of plaintext and 64 KiB of records by default, and the kernel socket
+    /// buffers take what they take -- on Linux loopback that autotunes into
+    /// the megabytes, where a peer that read 64 KiB of a 4 MiB body still let
+    /// 2.8 MB leave this process. So there is no portable tight bound here,
+    /// and this pins the two ends that are portable: the meter is in the TLS
+    /// path at all, and it counts each write once.
+    ///
+    /// What it catches, proven by reverting each: a meter absent from the
+    /// path, and one wrapped below the session, where it would count
+    /// ciphertext. What it does not catch: counting what a write offered
+    /// rather than what it took, nor counting a write twice -- rustls accepts
+    /// a whole buffer up to its limit, and a stalled peer makes hyper wait on
+    /// a waker rather than retry, so neither shows here. The upper bound below
+    /// is a sanity guard, not a detector for those. What pins the ceiling this
+    /// feeds is `an_upload_counts_no_more_than_the_connection_wrote`, whose
+    /// transport is a fake one and therefore deterministic.
+    #[cfg(feature = "rustls-tls")]
+    #[tokio::test]
+    async fn the_meter_counts_no_more_than_a_stalled_tls_peer_took() {
+        use std::io::Read as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use rustls_pki_types::pem::PemObject as _;
+        use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
+        /// Bigger than every buffer in the path together.
+        const BODY: usize = 4 * 1024 * 1024;
+        /// What the peer reads before it stops.
+        const TAKES: usize = 64 * 1024;
+
+        let (listener, url) = tls_listen();
+        let taken = Arc::new(AtomicUsize::new(0));
+        let read_by_peer = taken.clone();
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(TEST_CERT.as_bytes()).unwrap()],
+                PrivateKeyDer::from_pem_slice(TEST_KEY.as_bytes()).unwrap(),
+            )
+            .unwrap();
+        let config = Arc::new(config);
+
+        std::thread::spawn(move || {
+            let Ok((tcp, _)) = listener.accept() else {
+                return;
+            };
+            let conn = rustls::ServerConnection::new(config).unwrap();
+            let mut tls = rustls::StreamOwned::new(conn, tcp);
+
+            // The head, then part of the body, then nothing: the request is
+            // never answered and the connection is held open, so the client
+            // goes on writing into a peer that has stopped reading.
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match tls.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => return,
+                }
+            }
+            let mut chunk = vec![0u8; 16 * 1024];
+            while read_by_peer.load(Ordering::Relaxed) < TAKES {
+                match tls.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        read_by_peer.fetch_add(n, Ordering::Relaxed);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        });
+
+        let client = client(Duration::from_secs(2));
+        let wire = client.wire();
+        let body = Bytes::from(vec![b'x'; BODY]);
+        let result = client
+            .post_bytes(&url, "application/octet-stream", body)
+            .await;
+        assert!(result.is_err(), "the stalled peer must not answer");
+
+        let counted = wire.written();
+        let took = taken.load(Ordering::Relaxed) as u64;
+        assert!(
+            counted >= took,
+            "the meter counted {counted} but the peer read {took}"
+        );
+        assert!(
+            counted <= BODY as u64 + 4096,
+            "the meter counted {counted} of a {BODY}-byte body, so a write was \
+             counted more than once"
+        );
     }
 }
