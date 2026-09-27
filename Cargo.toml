@@ -86,7 +86,12 @@ serde = { version = "1", features = ["derive"] }
 tokio-native-tls = { version = "0.3", optional = true }
 serde_json = { version = "1", features = ["raw_value"] }
 socket2 = { version = "0.5", features = ["all"] }
-surge-ping = "0.9"
+# Held on the 0.8 line: 0.9.1 reaches for `AtomicU64`, which does not exist
+# where `max-atomic-width` is 32 -- 32-bit PowerPC and MIPS, so mpc85xx,
+# ath79 and ramips in OpenWrt. The counter behind it is only ever compared
+# for equality, so a 32-bit one would do; until upstream narrows it, this
+# crate stays where the ping phase is known to build and run.
+surge-ping = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
 tower-service = "0.3"
 url = "2"
