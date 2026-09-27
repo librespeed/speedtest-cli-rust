@@ -127,7 +127,7 @@ impl Server {
             Ok(u) => url_join_path(&u, &self.ping_url),
             Err(e) => {
                 write_debug!(out, "Failed when creating HTTP request: {e}\n");
-                return ServerStatus::default();
+                return ServerStatus::down(format!("{e:#}"));
             }
         };
 
@@ -164,16 +164,27 @@ impl Server {
                         "Failed when parsing get IP result: {}\n",
                         GoQuote(&body)
                     );
-                    return ServerStatus::default();
                 }
+                // Status first: a web server's 404 or 500 comes with an error
+                // page, and the status names that fault better than the body.
+                let down_reason = if status != StatusCode::OK {
+                    Some(format!("the ping request returned HTTP {status}"))
+                } else if !body.is_empty() {
+                    Some("the ping request returned a non-empty body".to_string())
+                } else {
+                    None
+                };
                 ServerStatus {
-                    up: status == StatusCode::OK,
-                    tls: facts.tls,
+                    up: down_reason.is_none(),
+                    down_reason,
+                    // As before, a probe answered with a body reports nothing
+                    // about its connection.
+                    tls: facts.tls.filter(|_| body.is_empty()),
                 }
             }
             Err(e) => {
                 write_debug!(out, "Error checking for server status: {e:#}\n");
-                ServerStatus::default()
+                ServerStatus::down(format!("{e:#}"))
             }
         }
     }
@@ -622,7 +633,20 @@ const PROBE_BODY_PEEK: usize = 8 * 1024;
 #[derive(Debug, Default)]
 pub struct ServerStatus {
     pub up: bool,
+    /// Why the backend is down, when it is: the refused connection, the
+    /// unreachable network, the wrong status or a body where none belongs.
+    pub down_reason: Option<String>,
     pub tls: Option<crate::http::TlsFacts>,
+}
+
+impl ServerStatus {
+    fn down(reason: String) -> Self {
+        ServerStatus {
+            up: false,
+            down_reason: Some(reason),
+            tls: None,
+        }
+    }
 }
 
 /// A running `--json-stream` progress ticker.
