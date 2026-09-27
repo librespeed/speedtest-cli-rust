@@ -113,7 +113,7 @@ jobs:
     env:
       # The commit the expectations were recorded against. The test is given
       # it too and refuses to run against another one.
-      LIBRESPEED_GO_COMMIT: b660d1e6c24f14fc93624538d9e73163e7784335
+      LIBRESPEED_GO_COMMIT: 8aefd77bd4bde428cd86d3622102f0ac0443d96e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
