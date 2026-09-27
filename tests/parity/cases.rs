@@ -11,7 +11,7 @@ use crate::compare::View;
 
 /// The commit of librespeed/speedtest-cli the expectations were recorded
 /// against. CI builds exactly this one; keep `.github/workflows/ci.yml` in step.
-pub const GO_COMMIT: &str = "b660d1e6c24f14fc93624538d9e73163e7784335";
+pub const GO_COMMIT: &str = "8aefd77bd4bde428cd86d3622102f0ac0443d96e";
 
 /// Why a difference is there: the words of README.md that explain it, so a
 /// difference nobody documented cannot be declared.
@@ -193,6 +193,7 @@ const SCHEMELESS: &str = "@FIX@/servers-schemeless.json";
 const SCHEMELESS_PORT: &str = "@FIX@/servers-schemeless-port.json";
 const HOSTILE: &str = "@FIX@/servers-hostile.json";
 const GARBLED: &str = "@FIX@/servers-garbled.json";
+const EMPTY: &str = "@FIX@/servers-empty.json";
 
 /// Reaches the ping and the report without moving any data.
 const NO_TRANSFER: [&str; 6] = [
@@ -259,14 +260,33 @@ fn reports() -> Vec<Case> {
 
 /// A backend that is not there, and a telemetry server that is not either.
 fn failures() -> Vec<Case> {
+    // Both clients fail the run without a report and name the cause, each in
+    // its own libraries' words.
     let dead = |name, args: &[&'static str]| {
         let mut all = vec!["--duration", "1", "--server", "2"];
         all.extend_from_slice(args);
-        listed(name, SERVERS, &all)
+        listed(name, SERVERS, &all).stderr(
+            &[Why::ErrorCauses],
+            &[
+                "Terminated due to error: Selected server Fixture Dead (127.0.0.1) is not responding: Get \"http://127.0.0.1:<DEAD>/empty.php\": dial tcp 127.0.0.1:<DEAD>: connect: connection refused",
+            ],
+            &[
+                "Terminated due to error: Selected server Fixture Dead (127.0.0.1) is not responding: client error (Connect): Connection refused (os error <ERRNO>)",
+            ],
+        )
     };
     vec![
+        dead("dead_plain", &[]),
         dead("dead_json", &["--json"]),
+        dead("dead_json_stream", &["--json-stream"]),
         dead("dead_csv", &["--csv"]),
+        // Nothing to test at all: --server -1 takes every server of a list
+        // that has none, and without --server there is nothing to pick from.
+        listed("empty_list_plain", EMPTY, &["--server", "-1"]),
+        listed("empty_list_json", EMPTY, &["--server", "-1", "--json"]),
+        listed("empty_list_json_stream", EMPTY, &["--server", "-1", "--json-stream"]),
+        listed("empty_list_csv", EMPTY, &["--server", "-1", "--csv"]),
+        listed("empty_list_autoselect", EMPTY, &["--json"]),
         listed("server_not_in_list", SERVERS, &["--duration", "1", "--server", "99"]),
         listed("server_not_found_two", SERVERS, &["--server", "99", "--server", "98"]),
         // No --server: every server is probed, and one of them is dead.

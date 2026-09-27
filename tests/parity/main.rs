@@ -17,7 +17,7 @@
 //!
 //! ```sh
 //! git clone https://github.com/librespeed/speedtest-cli go-client
-//! git -C go-client checkout b660d1e6c24f14fc93624538d9e73163e7784335
+//! git -C go-client checkout 8aefd77bd4bde428cd86d3622102f0ac0443d96e
 //! (cd go-client && go build -o librespeed-go .)
 //! LIBRESPEED_GO_BIN=$PWD/go-client/librespeed-go cargo test --test parity
 //! ```
@@ -53,7 +53,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 /// normalized away, so this only has to stay below what a CI runner can carry.
 const WORKERS: usize = 4;
 
-const SERVER_LISTS: [(&str, &str); 7] = [
+const SERVER_LISTS: [(&str, &str); 8] = [
     ("servers.json", include_str!("../data/parity/servers.json")),
     (
         "servers-special.json",
@@ -74,6 +74,10 @@ const SERVER_LISTS: [(&str, &str); 7] = [
     (
         "servers-garbled.json",
         include_str!("../data/parity/servers-garbled.json"),
+    ),
+    (
+        "servers-empty.json",
+        include_str!("../data/parity/servers-empty.json"),
     ),
     ("bad.json", include_str!("../data/parity/bad.json")),
 ];
