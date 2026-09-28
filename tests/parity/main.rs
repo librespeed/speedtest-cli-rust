@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use cases::{Case, Exit, Stream};
 use compare::{difference, lines_match};
 use fixture::{dead_port, Backend, Variant};
-use normalize::{decode, normalize, Context};
+use normalize::{decode, normalize, sort_probe_phase, Context};
 
 const RUST_BIN: &str = env!("CARGO_BIN_EXE_librespeed-cli");
 const GO_BIN_VAR: &str = "LIBRESPEED_GO_BIN";
@@ -193,7 +193,9 @@ fn run(binary: &str, case: &Case, world: &World) -> Run {
     let view = |bytes: &[u8]| case.view.apply(normalize(&world.context, &decode(bytes)));
     Run {
         stdout: view(&out),
-        stderr: view(&err),
+        // Only stderr carries the probe's lines, and only there is their order
+        // the concurrency's rather than the client's.
+        stderr: sort_probe_phase(view(&err)),
         // No code: a signal ended it, which no case expects of either client.
         exit: status.code().unwrap_or(-1),
     }

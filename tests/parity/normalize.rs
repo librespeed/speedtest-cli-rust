@@ -333,6 +333,33 @@ fn before(line: &str, suffix: &str, placeholder: &str) -> String {
     out
 }
 
+/// Sorts the lines the server probe printed, which is everything on stderr
+/// before the measurement's first line.
+///
+/// The probe runs the servers concurrently and prints each one's lines as it
+/// finishes, where the Go client goes through the list in order, so the two
+/// orders cross and a line printed by both clients ends up looking like a
+/// difference on both sides. Sorting the block leaves the comparison to decide
+/// what each client actually printed there, and keeps it strict everywhere
+/// else: a run that has not reached a server prints no boundary and is left
+/// exactly as it came, so a reordered usage error is still a difference.
+pub fn sort_probe_phase(mut lines: Vec<String>) -> Vec<String> {
+    let Some(boundary) = lines.iter().position(|line| measurement_starts(line)) else {
+        return lines;
+    };
+    lines[..boundary].sort();
+    lines
+}
+
+/// Whether this is the first line the measurement prints for a server, which is
+/// the selection in a normal run and the address in a `--debug` one. `Testing
+/// against 3 servers` comes before the probe, not after it, and is told apart
+/// by having no address in brackets.
+fn measurement_starts(line: &str) -> bool {
+    line.starts_with("Selected server: ")
+        || (line.starts_with("Testing against ") && line.ends_with(')'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +375,100 @@ mod tests {
         let lines = normalize(&context(), &format!("{line}\n"));
         assert_eq!(lines.len(), 1, "{lines:?}");
         lines.into_iter().next().unwrap()
+    }
+
+    fn lines(text: &[&str]) -> Vec<String> {
+        text.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn the_probe_block_is_sorted_and_the_measurement_is_left_alone() {
+        let out = sort_probe_phase(lines(&[
+            "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+            "Error checking for server status: refused",
+            "Server Fixture Dead (127.0.0.1) doesn't seem to be up, skipping",
+            "Testing against Fixture Live (http://127.0.0.1:<LIVE>/)",
+            "Download test starting",
+            "Upload test starting",
+        ]));
+        assert_eq!(
+            out,
+            lines(&[
+                "Error checking for server status: refused",
+                "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                "Server Fixture Dead (127.0.0.1) doesn't seem to be up, skipping",
+                // From the boundary on, the order is the client's own.
+                "Testing against Fixture Live (http://127.0.0.1:<LIVE>/)",
+                "Download test starting",
+                "Upload test starting",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_count_of_servers_is_not_the_boundary() {
+        // `Testing against 3 servers` is printed before the probe, so the two
+        // probe lines after it still have to be sorted.
+        let out = sort_probe_phase(lines(&[
+            "Testing against 3 servers",
+            "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+            "Error checking for server status: refused",
+            "Selected server: Fixture Live [127.0.0.1]",
+        ]));
+        assert_eq!(
+            out,
+            lines(&[
+                "Error checking for server status: refused",
+                "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                "Testing against 3 servers",
+                "Selected server: Fixture Live [127.0.0.1]",
+            ])
+        );
+    }
+
+    #[test]
+    fn either_line_starts_the_measurement_and_the_first_one_ends_the_block() {
+        // The selection in a normal run, the address in a `--debug` one. Only
+        // the first of them counts, so nothing past it is touched, however much
+        // it looks like the start of a measurement.
+        for boundary in [
+            "Selected server: Fixture Live [127.0.0.1]",
+            "Testing against Fixture Live (http://127.0.0.1:<LIVE>/)",
+        ] {
+            let out = sort_probe_phase(lines(&[
+                "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                "Error checking for server status: refused",
+                boundary,
+                "Upload test starting",
+                "Download test starting",
+                "Selected server: Fixture Live Two [127.0.0.1]",
+                "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                "Error checking for server status: refused",
+            ]));
+            assert_eq!(
+                out,
+                lines(&[
+                    "Error checking for server status: refused",
+                    "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                    boundary,
+                    "Upload test starting",
+                    "Download test starting",
+                    "Selected server: Fixture Live Two [127.0.0.1]",
+                    "Pinging 127.0.0.1:<LIVE> over TCP (IPv4)",
+                    "Error checking for server status: refused",
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn output_that_never_reached_a_server_keeps_its_order() {
+        let usage = lines(&[
+            "error: unexpected argument '--bogus' found",
+            "Usage: librespeed-cli [OPTIONS]",
+            "For more information, try '--help'.",
+        ]);
+        assert_eq!(sort_probe_phase(usage.clone()), usage);
     }
 
     #[test]
