@@ -168,6 +168,12 @@ jobs:
           # builds use plain `native-tls` against the SDK's libopenssl.
           - target: aarch64-unknown-linux-musl
             tls: vendored-openssl
+          # A target whose `max-atomic-width` is 32, the shape of OpenWrt's
+          # mpc85xx, ath79 and ramips. A dependency that reaches for
+          # `AtomicU64` builds on every target above and fails only here.
+          # OpenSSL again, because ring has no 32-bit PowerPC.
+          - target: powerpc-unknown-linux-gnu
+            tls: vendored-openssl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,8 +182,25 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # One cache per matrix entry. The key otherwise names only the job,
+          # so an entry restores whatever another one built.
+          key: ${{ matrix.target }}-${{ matrix.tls }}
       - run: cargo install cross@0.2.5 --locked
       - run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.tls }}
+        env:
+          # 32-bit PowerPC has no 64-bit atomic instruction, so the compiler
+          # calls into libatomic. Without this the link succeeds and CI stays
+          # green, but the loader cannot start the binary: __atomic_load_8 and
+          # five more resolve nowhere.
+          RUSTFLAGS: ${{ matrix.target == 'powerpc-unknown-linux-gnu' && '-C link-arg=-latomic' || '' }}
+      # That link is the one that can go wrong without failing, so start the
+      # artifact under the image's qemu. `--version` only: no network from CI.
+      - if: matrix.target == 'powerpc-unknown-linux-gnu'
+        run: |
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/w" \
+            ghcr.io/cross-rs/${{ matrix.target }}:0.2.5 \
+            qemu-ppc-static -L /usr/powerpc-linux-gnu /w/librespeed-cli --version
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: librespeed-cli-${{ matrix.target }}-${{ matrix.tls }}
