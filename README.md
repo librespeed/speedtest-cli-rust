@@ -173,6 +173,16 @@ deliberately different:
   HTTP status, and no share link is printed. Go does not check the status: it
   takes a share ID from any body with exactly one space in it, so a 500 reply
   can still yield a share link.
+- **A run whose servers are all down fails.** When no server picked with
+  `--server` answers its probe (the connection is refused, the network is
+  unreachable, the request times out or the backend answers wrongly), the run
+  ends with exit status 1 and `Terminated due to error:` naming each server
+  with its cause, and prints no report. The Go client prints an empty report
+  instead (`null` for `--json`, a `result` event carrying `null` for
+  `--json-stream`, an empty line for `--csv`) and exits 0; with `--json`,
+  `--json-stream`, `--csv` and `--simple` it prints nothing on stderr either,
+  so a run on a link that cannot reach the server looks like a success. When
+  some of the servers answer, both clients report those and exit 0.
 - **HTTP/1.1 by default, HTTP/2 behind `--http2`.** HTTP/2 carries every stream
   over one TCP connection, so `--concurrent` would stop meaning concurrent
   connections — and multiple connections is the standard way a speed test

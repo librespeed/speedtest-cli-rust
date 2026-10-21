@@ -149,6 +149,18 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
         stream.write_all(body)?;
         stream.flush()
     };
+    // What a real web server answers for a missing file or a broken script:
+    // the status, with an error page.
+    let error_page = |stream: &mut TcpStream, status: &str| -> std::io::Result<()> {
+        let page = format!("<html><body><h1>{status}</h1></body></html>\n");
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            page.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(page.as_bytes())?;
+        stream.flush()
+    };
 
     match (method.as_str(), path.as_str()) {
         (_, "/empty.php") => respond(&mut stream, b"", "text/plain")?,
@@ -176,6 +188,8 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
             telemetry_hits.fetch_add(1, Ordering::Relaxed);
             respond(&mut stream, b"id 4815162342", "text/plain")?
         }
+        ("GET", "/error-page.php") => error_page(&mut stream, "404 Not Found")?,
+        ("GET", "/server-error.php") => error_page(&mut stream, "500 Internal Server Error")?,
         _ => {
             stream.write_all(
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1002,4 +1016,241 @@ fn a_failed_step_is_reported_with_its_cause() {
         Some(format!("Terminated due to error: {cause}").as_str()),
         "{stderr}"
     );
+}
+
+/// A URL whose port nothing listens on, below the ephemeral range as with the
+/// parity fixture's dead port, so no other test's socket can be given it.
+fn dead_url() -> String {
+    let first = 20000 + (std::process::id() % 5000) as u16;
+    let port = (first..30000)
+        .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
+        .expect("a free port");
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// Writes a server list and returns its path; each entry is `(id, name,
+/// server URL, ping URL)`.
+fn write_server_list(name: &str, servers: &[(i64, &str, String, &str)]) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "librespeed-cli-test-{name}-{}.json",
+        std::process::id()
+    ));
+    let entries: Vec<String> = servers
+        .iter()
+        .map(|(id, name, url, ping)| {
+            format!(
+                r#"{{"name":"{name}","server":"{url}","id":{id},"dlURL":"garbage.php","ulURL":"empty.php","pingURL":"{ping}","getIpURL":"getIP.php","sponsorName":"","sponsorURL":""}}"#
+            )
+        })
+        .collect();
+    std::fs::write(&path, format!("[{}]", entries.join(","))).expect("write server list");
+    path
+}
+
+/// The error the run terminated with, from the line main prints for it; panics
+/// when stderr has no such line.
+fn failure(out: &Output) -> String {
+    const PREFIX: &str = "Terminated due to error: ";
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stderr
+        .lines()
+        .find_map(|line| line.strip_prefix(PREFIX))
+        .unwrap_or_else(|| panic!("stderr has no {PREFIX:?} line:\n{stderr}"))
+        .to_string()
+}
+
+// An unreachable server fails the run in every mode: exit 1, the server and the
+// cause on stderr, no report on stdout. Go prints an empty report and exits 0.
+#[test]
+fn a_server_that_is_down_fails_the_run_in_every_mode() {
+    const DOWN: &str = "Selected server Dead (127.0.0.1) is not responding: ";
+    let list = write_server_list("down", &[(1, "Dead", dead_url(), "empty.php")]);
+    for mode in [
+        &[][..],
+        &["--json"],
+        &["--json-stream"],
+        &["--csv"],
+        &["--simple"],
+    ] {
+        let mut args = vec!["--local-json", list.to_str().unwrap(), "--server", "1"];
+        args.extend_from_slice(&["--duration", "1", "--no-icmp"]);
+        args.extend_from_slice(mode);
+        let out = run(&args);
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{mode:?}: {stderr}");
+        assert_eq!(stdout_of(&out), "", "{mode:?}: no report");
+        let msg = failure(&out);
+        // The cause is worded by reqwest and the OS; only its presence counts.
+        let cause = msg
+            .strip_prefix(DOWN)
+            .unwrap_or_else(|| panic!("{mode:?}: {msg}"));
+        assert!(!cause.is_empty(), "{mode:?}: the cause is named: {msg}");
+        if mode.is_empty() {
+            assert!(
+                stderr.contains(
+                    "\nSelected server Dead (127.0.0.1) is not responding at the moment, try again later\n"
+                ),
+                "{stderr}"
+            );
+        }
+    }
+}
+
+// A backend answering its probe wrongly is down, and the error says what it
+// answered: a wrong status (even with an error page), otherwise the body.
+#[test]
+fn a_server_answering_its_probe_wrongly_fails_the_run_with_what_it_answered() {
+    let backend = MockBackend::start();
+    for (ping, answered) in [
+        ("missing.php", "HTTP 404 Not Found"),
+        ("error-page.php", "HTTP 404 Not Found"),
+        ("server-error.php", "HTTP 500 Internal Server Error"),
+        ("getIP.php", "a non-empty body"),
+    ] {
+        let list = write_server_list("probe-wrong", &[(1, "Wrong", backend.url(), ping)]);
+        let out = run(&[
+            "--local-json",
+            list.to_str().unwrap(),
+            "--server",
+            "1",
+            "--no-icmp",
+            "--json",
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{ping}");
+        assert_eq!(stdout_of(&out), "", "{ping}");
+        assert_eq!(
+            failure(&out),
+            format!(
+                "Selected server Wrong (127.0.0.1) is not responding: the ping request returned {answered}"
+            ),
+            "{ping}"
+        );
+    }
+}
+
+// With several servers all down, the error names each one with its own cause,
+// not only the last one tried.
+#[test]
+fn a_run_whose_servers_are_all_down_names_each_with_its_cause() {
+    let backend = MockBackend::start();
+    let list = write_server_list(
+        "all-down",
+        &[
+            (1, "Dead", dead_url(), "empty.php"),
+            (2, "Wrong", backend.url(), "error-page.php"),
+        ],
+    );
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--server",
+        "2",
+        "--duration",
+        "1",
+        "--no-icmp",
+        "--json",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(stdout_of(&out), "", "no report");
+    let msg = failure(&out);
+    let causes = msg
+        .strip_prefix("None of the 2 selected servers is responding: ")
+        .unwrap_or_else(|| panic!("{msg}"));
+    // Split at the last "; ": the first cause's wording is not ours.
+    let (dead, wrong) = causes.rsplit_once("; ").unwrap_or_else(|| panic!("{msg}"));
+    let refused = dead
+        .strip_prefix("Dead (127.0.0.1): ")
+        .unwrap_or_else(|| panic!("{msg}"));
+    assert!(!refused.is_empty(), "the refusal is named: {msg}");
+    assert_eq!(
+        wrong,
+        "Wrong (127.0.0.1): the ping request returned HTTP 404 Not Found"
+    );
+}
+
+// With more than one server, a run that measured any of them reports those and
+// succeeds, as the Go client's does.
+#[test]
+fn a_down_server_among_others_leaves_the_run_to_the_ones_that_answer() {
+    let backend = MockBackend::start();
+    let list = write_server_list(
+        "one-down",
+        &[
+            (1, "Live", backend.url(), "empty.php"),
+            (2, "Dead", dead_url(), "empty.php"),
+        ],
+    );
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--server",
+        "2",
+        "--duration",
+        "0",
+        "--no-download",
+        "--no-upload",
+        "--no-icmp",
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reports: serde_json::Value = serde_json::from_str(&stdout_of(&out)).expect("valid JSON");
+    let names: Vec<&str> = reports
+        .as_array()
+        .expect("a report array")
+        .iter()
+        .map(|r| r["server"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Live"]);
+}
+
+// Without --server the fastest server is picked and a down one skipped, as
+// before: with every server down the run fails before any test.
+#[test]
+fn automatic_selection_with_every_server_down_fails_as_before() {
+    let backend = MockBackend::start();
+    let list = write_server_list(
+        "auto-down",
+        &[
+            (1, "Dead", dead_url(), "empty.php"),
+            (2, "Wrong", backend.url(), "error-page.php"),
+        ],
+    );
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--no-icmp",
+        "--json",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(stdout_of(&out), "", "no report");
+    assert!(
+        stderr.contains("No server is currently available, please try again later.\n"),
+        "{stderr}"
+    );
+}
+
+// A server list that cannot be fetched fails as it always did.
+#[test]
+fn an_unreachable_server_list_still_fails_the_run() {
+    let url = format!("{}servers.json", dead_url());
+    let out = run(&["--server-json", &url, "--server", "1", "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(stdout_of(&out), "");
+    assert!(
+        stderr.contains("Error when fetching server list: "),
+        "{stderr}"
+    );
+    assert!(!failure(&out).is_empty(), "{stderr}");
 }
