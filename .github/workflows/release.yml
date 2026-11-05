@@ -60,12 +60,26 @@ jobs:
     with:
       ref: ${{ needs.resolve.outputs.source }}
 
+  # What a tag publishes cannot be taken back, so a known advisory in its lock
+  # file stops it here. README's release policy says how to decide on one.
+  advisories:
+    name: Advisories
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.source }}
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+
   # The canonical crate is assembled once, here, and this job also fixes
   # which commit the rest of the run is about. The publish job reproduces
   # the crate and compares the bytes before uploading anything.
   prepare:
     name: Package the crate
-    needs: [resolve, validate]
+    needs: [resolve, validate, advisories]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.guard.outputs.version }}
@@ -137,10 +151,11 @@ jobs:
       # this installs, and cross is part of what builds the binaries.
       - run: cargo install cross@0.2.5 --locked
 
-      # OpenSSL is vendored so the published binaries are self-contained;
-      # OpenWrt packages build against the SDK's libopenssl instead.
+      # rustls, so the published binaries are self-contained and carry no OpenSSL
+      # of their own to keep up to date. OpenWrt packages build against the SDK's
+      # libopenssl instead.
       - name: Build
-        run: cross build --release --target ${{ matrix.target }} --no-default-features --features vendored-openssl
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Package
         run: |

@@ -52,7 +52,6 @@ a reproducible build date in `--version`.
 | --- | --- | --- | --- |
 | `rustls-tls` (default) | rustls + ring | none, statically linked | anything |
 | `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
-| `vendored-openssl` | OpenSSL built from source | none, statically linked | anything OpenSSL builds for |
 
 `ring` builds everywhere, falling back to portable C where it has no
 hand-written assembly, which is everything outside x86, x86_64, aarch64 and
@@ -291,8 +290,8 @@ one chain and stops at the first step that fails:
 2. **Checks** run [ci.yml](.github/workflows/ci.yml) against that commit:
    tests on three platforms, both TLS backends, the minimum supported Rust
    version, lint, the fuzz targets, the differential test against the Go
-   client and `cargo package`. Nothing is built or published until they
-   pass.
+   client and `cargo package`, and a tag with a known advisory in its
+   `Cargo.lock` stops too. Nothing is built or published until they pass.
 3. **Package the crate** verifies the tag against `version` in `Cargo.toml`
    and builds the `.crate` once, recording its SHA-256. A tag that disagrees
    stops the run here, before a release exists to leave behind.
