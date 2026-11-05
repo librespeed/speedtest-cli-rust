@@ -1,36 +1,45 @@
 version: 2
 updates:
+  # Once a month, one pull request per ecosystem. Weekly mostly produced group
+  # pull requests that the next week's replaced unmerged. Security updates start
+  # from a GitHub alert and wait for neither this schedule nor the cooldown, but
+  # not every RustSec advisory gets an alert, or gets one in time. The weekly
+  # Audit run covers those.
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 10
+      interval: monthly
+    # Also the crates no Cargo.toml names. rustls-webpki is one, and an advisory
+    # without a GitHub alert would otherwise never move it.
+    allow:
+      - dependency-type: all
+    # Lock files only. A version that needs a Cargo.toml edit usually needs code
+    # too and is a decision for a person: rand 0.10 was done by hand, socket2 0.6
+    # was declined, and the one such bump merged as offered, surge-ping 0.9,
+    # broke 32-bit targets. The cost is that new major versions go unannounced.
+    versioning-strategy: lockfile-only
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "deps"
     groups:
-      # Keep the interlocking hyper/rustls stacks in one PR each: bumping them
-      # piecemeal tends to produce PRs that cannot build on their own.
-      hyper:
+      # One group, so the interlocking hyper and rustls stacks cannot be split
+      # into pull requests that do not build on their own.
+      cargo:
+        applies-to: version-updates
         patterns:
-          - "hyper*"
-          - "http*"
-          - "tower*"
-      tls:
+          - "*"
+      cargo-security:
+        applies-to: security-updates
         patterns:
-          - "rustls*"
-          - "native-tls"
-          - "tokio-native-tls"
-      minor-and-patch:
-        update-types:
-          - minor
-          - patch
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ci"
     ignore:
@@ -40,5 +49,6 @@ updates:
       - dependency-name: dtolnay/rust-toolchain
     groups:
       actions:
+        applies-to: version-updates
         patterns:
           - "*"

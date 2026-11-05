@@ -12,9 +12,8 @@ targets = [
 all-features = true
 
 [advisories]
-# RustSec advisories. Vulnerabilities fail the build; unmaintained and
-# unsound crates are surfaced but left to a human, since a replacement is
-# not always available.
+# RustSec advisories. Whatever matches fails the check. The way past one is an
+# entry in `ignore` with a `reason`, and RELEASING.md says when that is right.
 yanked = "deny"
 ignore = []
 

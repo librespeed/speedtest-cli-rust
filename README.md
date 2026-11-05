@@ -275,11 +275,17 @@ LIBRESPEED_GO_BIN=$PWD/go-client/librespeed-go cargo test --test parity
 
 ## Releasing
 
-A release is a tag. Bump `version` in `Cargo.toml`, commit it, then:
+[RELEASING.md](RELEASING.md) says when a release goes out, when one goes to
+OpenWrt, and how dependencies are kept up to date.
+
+### How to release
+
+A release is a tag. Bump `version` in `Cargo.toml`, run `cargo update --workspace`
+so that `Cargo.lock` follows, commit both, then:
 
 ```sh
-git tag -a v0.1.2 -m "librespeed-cli 0.1.2"
-git push origin v0.1.2
+git tag -a v1.2.1 -m "librespeed-cli 1.2.1"
+git push origin v1.2.1
 ```
 
 The tag starts [release.yml](.github/workflows/release.yml), which runs in
@@ -311,11 +317,10 @@ Running the workflow by hand rebuilds the binaries for a tag that is already
 out; that path never publishes.
 
 The tag is checked again before the GitHub release is cut and once more
-immediately before the upload, because the approval on the `crates-io`
-environment can hold the run for hours. That is detection, not a lock: a tag
-can still move a moment after a check returns. Protecting `v*` tags against
-force-pushes and deletion with a repository ruleset is what prevents it, and
-these checks catch what slips past.
+immediately before the upload, because a run takes long enough for a tag to
+move. That is detection, not a lock: a tag can still move a moment after a
+check returns. Protecting `v*` tags against force-pushes and deletion with a
+repository ruleset is what prevents it, and these checks catch what slips past.
 
 Releases are built with the compiler named in `RELEASE_TOOLCHAIN`, with
 `cross` pinned to a version, and with every action pinned to a commit. CI
@@ -357,9 +362,9 @@ place to keep in step, and configuring those needs repository admin.
 
 Trusted Publishing cannot be configured for a crate that does not exist yet,
 so the first version went out with an API token from
-<https://crates.io/settings/tokens>, stored on the `crates-io` environment as
-the secret `CARGO_REGISTRY_TOKEN`. Nothing reads that secret any more and it
-can be deleted.
+<https://crates.io/settings/tokens>, stored as the repository secret
+`CARGO_REGISTRY_TOKEN`. Nothing reads that secret any more and it can be
+deleted.
 
 ## License
 

@@ -2,34 +2,31 @@ name: Audit
 
 on:
   push:
+    # Named, or a Dependabot branch runs this twice: for the push and for the
+    # pull request.
+    branches: [master, main]
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "deny.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
   schedule:
     # Catches advisories published against dependencies we have not touched.
+    # GitHub notifies whoever created the workflow, last edited this line or
+    # re-enabled it about a failed scheduled run, by mail if their settings say so.
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
-  issues: write
-  checks: write
 
 jobs:
-  audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
@@ -39,7 +36,27 @@ jobs:
         # Separate jobs so one failing check does not mask the others.
         check: [advisories, licenses, sources, bans]
     steps:
-      - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check ${{ matrix.check }}
+
+  # Users run the latest tag, not master, so a fix on master does not end this
+  # until a release carries it. The tag's lock file is checked against the
+  # current deny.toml, which is where a decision about an advisory is written.
+  latest-release:
+    name: cargo deny (latest release)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Switch to the latest release
+        # The suffix sorts a prerelease below its release.
+        run: |
+          git checkout --quiet "$(git -c versionsort.suffix=- tag --list 'v[0-9]*' --sort=-version:refname | head -n 1)"
+          git checkout --quiet "$GITHUB_SHA" -- deny.toml
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories

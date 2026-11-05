@@ -63,6 +63,12 @@ The latest release. Fixes are not backported.
 
 ## Dependencies
 
-CI runs `cargo audit` against the RustSec database on every dependency change
-and weekly, and `cargo deny` for advisories, licences, sources and duplicate
-crates. Dependabot proposes updates for cargo and GitHub Actions.
+CI runs `cargo deny` for RustSec advisories, licences, sources and duplicate
+crates on every dependency change and weekly. The weekly run also checks the lock
+file of the latest release, so an advisory stays visible until a release carries
+the fix or the [release policy](RELEASING.md#when-to-release) rules it out.
+
+Dependabot proposes updates once a month, and security updates as soon as GitHub
+has an alert for them. Not every advisory gets an alert, so the weekly run is the
+more complete of the two. A dependency update does not by itself lead to a
+release.
