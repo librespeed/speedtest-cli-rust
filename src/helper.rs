@@ -63,6 +63,9 @@ pub async fn do_speed_test(
     let delimiter = cli.csv_delimiter_byte()?;
     let mut reps_json: Vec<JSONReport> = Vec::new();
     let mut reps_csv: Vec<CSVReport> = Vec::new();
+    let mut measured = false;
+    // Each server that did not answer its probe, and why.
+    let mut down: Vec<(String, String)> = Vec::new();
 
     for current_server in servers {
         let tlog = TelemetryLog::new();
@@ -106,6 +109,16 @@ pub async fn do_speed_test(
             if servers.len() > 1 && !out.quiet {
                 output::write_ui_blank();
             }
+            down.push((
+                format!(
+                    "{} ({})",
+                    output::sanitize(&current_server.name),
+                    output::sanitize(&hostname)
+                ),
+                status
+                    .down_reason
+                    .unwrap_or_else(|| "its probe failed".to_string()),
+            ));
             continue;
         }
 
@@ -339,10 +352,18 @@ pub async fn do_speed_test(
             });
         }
 
+        measured = true;
+
         // Add a blank line after each test when testing multiple servers.
         if servers.len() > 1 && !out.quiet {
             output::write_ui_blank();
         }
+    }
+
+    // No server answered: fail the run. Go prints an empty report and exits 0,
+    // which a script takes for success: quiet mode hides the line saying why.
+    if !measured && !down.is_empty() {
+        return Err(none_responding(&down));
     }
 
     if cli.csv {
@@ -377,11 +398,25 @@ fn report_failure(what: &str, e: anyhow::Error) -> anyhow::Error {
     e
 }
 
+/// The error for a run whose servers were all down: each one and its cause.
+fn none_responding(down: &[(String, String)]) -> anyhow::Error {
+    match down {
+        [(server, why)] => anyhow::anyhow!("Selected server {server} is not responding: {why}"),
+        _ => anyhow::anyhow!(
+            "None of the {} selected servers is responding: {}",
+            down.len(),
+            down.iter()
+                .map(|(server, why)| format!("{server}: {why}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    }
+}
+
 /// The reports as JSON sees them: `null` when nothing was measured.
 ///
-/// Go declares a nil slice, which marshals to `null`, and both clients exit 0
-/// even when every server failed -- so the document is the only signal that
-/// nothing happened, and a consumer testing for null must keep seeing it.
+/// Go declares a nil slice, which marshals to `null`. Down servers fail the run
+/// earlier, leaving a run with no server to test (`--server -1`, empty list).
 fn json_reports(reports: &[JSONReport]) -> Option<&[JSONReport]> {
     (!reports.is_empty()).then_some(reports)
 }

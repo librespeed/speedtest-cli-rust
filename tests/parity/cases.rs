@@ -21,6 +21,7 @@ pub enum Why {
     CsvFormulas,
     CsvQuoting,
     TelemetryStatus,
+    DownServerFails,
     SchemelessPort,
     SchemeCase,
     NumbersRefused,
@@ -47,6 +48,7 @@ impl Why {
             Why::CsvFormulas => "**CSV formulas are defused.**",
             Why::CsvQuoting => "**CSV quoting follows the csv crate.**",
             Why::TelemetryStatus => "**A telemetry reply other than 2xx fails the upload.**",
+            Why::DownServerFails => "**A run whose servers are all down fails.**",
             Why::SchemelessPort => "**Scheme-less server URLs with a port work.**",
             Why::SchemeCase => "**A server URL's scheme keeps its case.**",
             Why::NumbersRefused => "**Numbers the Go client cannot act on are refused.**",
@@ -259,14 +261,31 @@ fn reports() -> Vec<Case> {
 
 /// A backend that is not there, and a telemetry server that is not either.
 fn failures() -> Vec<Case> {
-    let dead = |name, args: &[&'static str]| {
-        let mut all = vec!["--duration", "1", "--server", "2"];
+    // Go exits 0, after an empty report where one was asked for; here the run
+    // fails and says why.
+    const DEAD: [&str; 4] = ["--duration", "1", "--server", "2"];
+    // The cause is worded by reqwest and the OS, so it is left to `*`.
+    const DEAD_FAILS: &str =
+        "Terminated due to error: Selected server Fixture Dead (127.0.0.1) is not responding: *";
+    let dead = |name, args: &[&'static str], go_report: Lines| {
+        let mut all = DEAD.to_vec();
         all.extend_from_slice(args);
         listed(name, SERVERS, &all)
+            .stdout(&[Why::DownServerFails], go_report, &[])
+            .stderr(&[Why::DownServerFails], &[], &[DEAD_FAILS])
+            .exit(&[Why::DownServerFails], 0, 1)
     };
     vec![
-        dead("dead_json", &["--json"]),
-        dead("dead_csv", &["--csv"]),
+        listed("dead_plain", SERVERS, &DEAD)
+            .stderr(&[Why::DownServerFails], &[], &[DEAD_FAILS])
+            .exit(&[Why::DownServerFails], 0, 1),
+        dead("dead_json", &["--json"], &["null"]),
+        dead(
+            "dead_json_stream",
+            &["--json-stream"],
+            &[r#"{"event":"result","reports":null}"#],
+        ),
+        dead("dead_csv", &["--csv"], &[""]),
         listed("server_not_in_list", SERVERS, &["--duration", "1", "--server", "99"]),
         listed("server_not_found_two", SERVERS, &["--server", "99", "--server", "98"]),
         // No --server: every server is probed, and one of them is dead.
@@ -866,7 +885,15 @@ fn garbled() -> Vec<Case> {
                 "--duration", "0", "--server", "2", "--no-download", "--no-upload", "--debug",
                 "--simple",
             ],
-        ),
+        )
+        .stderr(
+            &[Why::DownServerFails],
+            &[],
+            &[
+                "Terminated due to error: Selected server Garbled probe (127.0.0.1) is not responding: the ping request returned a non-empty body",
+            ],
+        )
+        .exit(&[Why::DownServerFails], 0, 1),
         telemetry("telemetry_500_id", "/telemetry-500-id.php")
         .stdout(
             &[Why::TelemetryStatus],
