@@ -155,6 +155,11 @@ jobs:
   cross:
     name: ${{ matrix.target }} (${{ matrix.tls }})
     runs-on: ubuntu-latest
+    env:
+      # 32-bit PowerPC has no 64-bit atomic instruction, so the compiler calls
+      # into libatomic. Without this the link succeeds and CI stays green, but
+      # the loader cannot start the binary.
+      RUSTFLAGS: ${{ matrix.target == 'powerpc-unknown-linux-gnu' && '-C link-arg=-latomic' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -169,6 +174,11 @@ jobs:
           # uses. OpenSSL is compiled in here only because the cross image has
           # none for the target; OpenWrt builds link the SDK's libopenssl.
           - target: aarch64-unknown-linux-musl
+            tls: native-tls
+          # A target whose `max-atomic-width` is 32, the shape of OpenWrt's
+          # mpc85xx, ath79 and ramips. A dependency that reaches for
+          # `AtomicU64` builds on every target above and fails only here.
+          - target: powerpc-unknown-linux-gnu
             tls: native-tls
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
