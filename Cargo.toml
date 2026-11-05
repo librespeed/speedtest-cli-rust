@@ -55,9 +55,6 @@ rustls-tls = [
 # support, such as the 32-bit PowerPC e500v2 in Turris 1.x routers. This is what
 # OpenWrt packaging wants: it reuses the libopenssl already in the image.
 native-tls = ["dep:hyper-tls", "dep:native-tls", "dep:tokio-native-tls"]
-# As above, but builds OpenSSL from source and links it statically, for
-# cross-compiling without the target's OpenSSL headers at hand.
-vendored-openssl = ["native-tls", "native-tls/vendored"]
 
 [dependencies]
 anyhow = "1"

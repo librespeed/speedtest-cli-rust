@@ -32,7 +32,6 @@ body:
       options:
         - rustls-tls (default)
         - native-tls (system OpenSSL)
-        - vendored-openssl
         - not sure
     validations:
       required: true
