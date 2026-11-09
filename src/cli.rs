@@ -225,7 +225,9 @@ pub struct Cli {
     /// Allow HTTP/2 when the server offers it. Off by default: HTTP/2 carries
     /// every stream over one TCP connection, so --concurrent would no longer
     /// mean concurrent connections, which is what a speed test measures
-    #[arg(long = "http2")]
+    // Hidden from --help in a build without the `http2` feature, where it is
+    // refused with an error that says why.
+    #[arg(long = "http2", hide = cfg!(not(feature = "http2")))]
     pub http2: bool,
 }
 

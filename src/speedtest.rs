@@ -59,6 +59,10 @@ pub async fn run(cli: &Cli) -> anyhow::Result<()> {
         anyhow::bail!("incompatible options 'source' and 'interface'");
     }
 
+    if cli.http2 && !cfg!(feature = "http2") {
+        anyhow::bail!("this build has no HTTP/2 support, so --http2 cannot be used");
+    }
+
     let delimiter = cli.csv_delimiter_byte()?;
 
     // If --csv-header is given, print the header and exit (same behavior as speedtest-cli).
