@@ -322,15 +322,20 @@ mod imp {
             .https_or_http();
 
         // ALPN decides the protocol, so h2 is only reachable when offered here.
-        Ok(ReportingConnector(if tls.http2 {
-            builder
-                .enable_all_versions()
-                .wrap_connector(BoundConnector::new(bind))
-        } else {
+        #[cfg(feature = "http2")]
+        if tls.http2 {
+            return Ok(ReportingConnector(
+                builder
+                    .enable_all_versions()
+                    .wrap_connector(BoundConnector::new(bind)),
+            ));
+        }
+
+        Ok(ReportingConnector(
             builder
                 .enable_http1()
-                .wrap_connector(BoundConnector::new(bind))
-        }))
+                .wrap_connector(BoundConnector::new(bind)),
+        ))
     }
 }
 
@@ -370,7 +375,7 @@ mod imp {
             builder.disable_built_in_roots(true);
         }
 
-        if tls.http2 {
+        if cfg!(feature = "http2") && tls.http2 {
             builder.request_alpns(&["h2", "http/1.1"]);
         }
 

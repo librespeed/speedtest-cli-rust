@@ -42,7 +42,7 @@ name = "librespeed-cli"
 path = "src/main.rs"
 
 [features]
-default = ["rustls-tls"]
+default = ["rustls-tls", "http2"]
 # rustls with the ring crypto provider. Statically linked, no system TLS
 # library needed. ring has assembly only for x86, x86_64, aarch64 and arm and
 # runs portable C elsewhere, which is slow on a core without crypto instructions.
@@ -57,6 +57,9 @@ rustls-tls = [
 # packaging uses: it depends on the libopenssl package instead of carrying a
 # TLS library of its own.
 native-tls = ["dep:hyper-tls", "dep:native-tls", "dep:tokio-native-tls"]
+# HTTP/2 behind --http2. Without it the option is refused and h2 is not
+# compiled in, which is what a size-constrained build such as OpenWrt's wants.
+http2 = ["hyper/http2", "hyper-util/http2", "hyper-rustls?/http2"]
 
 [dependencies]
 anyhow = "1"
@@ -68,13 +71,13 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "http1", "http2"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12", "ring", "rustls-native-certs"], optional = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "rustls-native-certs"], optional = true }
 # alpn: without it hyper-tls compiles out its report of the negotiated
 # protocol, so hyper would write an HTTP/1.1 head onto a connection both ends
 # agreed to speak h2 on. It forwards to native-tls/alpn, already enabled.
 hyper-tls = { version = "0.6", features = ["alpn"], optional = true }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 libc = "0.2"
 native-tls = { version = "0.2", features = ["alpn"], optional = true }
 rand = "0.10"

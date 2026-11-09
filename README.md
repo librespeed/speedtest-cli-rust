@@ -62,8 +62,12 @@ librespeed-cli --fwmark 42          # Linux only
 | `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
 
 ```sh
-cargo build --release --no-default-features --features native-tls
+cargo build --release --no-default-features --features native-tls,http2
 ```
+
+HTTP/2 is the `http2` feature, on by default. `--no-default-features` drops it
+as well, so name it again if `--http2` is wanted. A build without it is smaller
+and refuses `--http2`.
 
 > [!IMPORTANT]
 > `ring` has assembly only for x86, x86_64, aarch64 and arm. Elsewhere it runs
@@ -82,8 +86,9 @@ The Go client cannot run on 32-bit PowerPC, because Go targets only `ppc64` and
 `ppc64le`. Rust reaches that hardware through the Tier 3 target
 `powerpc-unknown-linux-muslspe`, so this port also covers Turris 1.x.
 
-The OpenWrt package `librespeed-cli-rust` builds the `native-tls` backend and
-depends on `libopenssl`.
+The OpenWrt package `librespeed-cli-rust` builds the `native-tls` backend with
+`--no-default-features` and depends on `libopenssl`. That leaves HTTP/2 out,
+as in the Turris build below, while a plain `cargo build` has it.
 
 To build for Turris 1.x by hand:
 
@@ -153,6 +158,7 @@ deliberately different.
   over one TCP connection, so `--concurrent` would stop meaning connections.
   Go negotiates h2 whenever a server offers it. With `--http2` the flow-control
   windows are raised to Go's values, 4 MiB per stream and 1 GiB per connection.
+  A build without the `http2` feature refuses the option.
 - **Scheme-less server URLs with a port work.** `example.com:8080/backend`
   becomes an `http://` URL. Go takes `example.com` for the scheme, and
   `127.0.0.1:8080/` makes it reject the whole list.

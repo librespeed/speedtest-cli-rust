@@ -66,7 +66,9 @@ pub const MAX_TELEMETRY_RESPONSE: usize = 64 * 1024;
 /// The protocol default is 64 KiB, which caps a stream at window/RTT: about
 /// 105 Mbps at 5 ms and 26 Mbps at 20 ms. Leaving it there would silently
 /// understate any link faster than that.
+#[cfg(feature = "http2")]
 const H2_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+#[cfg(feature = "http2")]
 const H2_CONNECTION_WINDOW: u32 = 1024 * 1024 * 1024;
 
 pub type ReqBody = BoxBody<Bytes, io::Error>;
@@ -190,11 +192,15 @@ pub(crate) fn client_builder(
     let mut builder = Client::builder(TokioExecutor::new());
     builder.pool_max_idle_per_host(concurrent + 2);
 
+    #[cfg(feature = "http2")]
     if http2 {
         builder
             .http2_initial_stream_window_size(H2_STREAM_WINDOW)
             .http2_initial_connection_window_size(H2_CONNECTION_WINDOW);
     }
+    // A build without the `http2` feature refuses --http2 before it gets here.
+    #[cfg(not(feature = "http2"))]
+    let _ = http2;
     builder
 }
 
