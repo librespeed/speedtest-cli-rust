@@ -14,9 +14,9 @@ updates:
     allow:
       - dependency-type: all
     # Lock files only. A version that needs a Cargo.toml edit usually needs code
-    # too and is a decision for a person: rand 0.10 was done by hand, socket2 0.6
-    # was declined, and the one such bump merged as offered, surge-ping 0.9,
-    # broke 32-bit targets. The cost is that new major versions go unannounced.
+    # too and is a decision for a person: rand 0.10 and socket2 0.6 were done by
+    # hand, and the one such bump merged as offered, surge-ping 0.9, broke 32-bit
+    # targets. The cost is that new major versions go unannounced.
     versioning-strategy: lockfile-only
     cooldown:
       default-days: 7
