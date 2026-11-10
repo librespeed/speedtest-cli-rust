@@ -1,7 +1,5 @@
 # Releasing
 
-How to cut a release is in the [README](README.md#how-to-release).
-
 ## When to release
 
 A release publishes to crates.io and cannot be taken back, so it stays a tag
@@ -76,3 +74,91 @@ in OpenWrt's oldest stable branch, or a fix can no longer reach it.
 Keep merging the monthly updates. Without activity GitHub disables the scheduled
 Audit run after 60 days, and a Dependabot pull request left untouched for 90 days
 pauses Dependabot, security updates included.
+
+## How to release
+
+A release is a tag. Bump `version` in `Cargo.toml`, run `cargo update --workspace`
+so that `Cargo.lock` follows, commit both, then:
+
+```sh
+git tag -a v1.2.1 -m "librespeed-cli 1.2.1"
+git push origin v1.2.1
+```
+
+The tag starts [release.yml](.github/workflows/release.yml), which runs in
+one chain and stops at the first step that fails:
+
+1. **Resolve the commit** turns the tag into a commit, once. Every step
+   after it is handed that commit instead of resolving the tag again, so a
+   tag that moves mid-release cannot split the run across two of them.
+2. **Checks** run [ci.yml](.github/workflows/ci.yml) against that commit:
+   tests on three platforms, both TLS backends, the minimum supported Rust
+   version, lint, the fuzz targets, the differential test against the Go
+   client and `cargo package`, and a tag with a known advisory in its
+   `Cargo.lock` stops too. Nothing is built or published until they pass.
+3. **Package the crate** verifies the tag against `version` in `Cargo.toml`
+   and builds the `.crate` once, recording its SHA-256. A tag that disagrees
+   stops the run here, before a release exists to leave behind.
+4. **Build** cross-builds the musl binaries.
+5. **Publish release** attaches the tarballs and `SHA256SUMS` to a GitHub
+   release.
+6. **Publish to crates.io** checks the tag again against the commit it is
+   about to upload, rebuilds the crate and refuses to publish unless it comes
+   out byte for byte the one step 3 validated. `cargo` cannot upload a
+   `.crate` it did not just build, so this comparison is what ties the two
+   together. A dry run goes first, so a crate that cannot be published is
+   distinguishable from an upload that failed. Only then does the job ask
+   crates.io for a publishing token, through Trusted Publishing.
+
+Running the workflow by hand rebuilds the binaries for a tag that is already
+out; that path never publishes.
+
+The tag is checked again before the GitHub release is cut and once more
+immediately before the upload, because a run takes long enough for a tag to
+move. That is detection, not a lock: a tag can still move a moment after a
+check returns. Protecting `v*` tags against force-pushes and deletion with a
+repository ruleset is what prevents it, and these checks catch what slips past.
+
+Releases are built with the compiler named in `RELEASE_TOOLCHAIN`, with
+`cross` pinned to a version, and with every action pinned to a commit. CI
+keeps using whatever `stable` is that day: the two answer different
+questions, CI that the code has not fallen behind the compiler, a release
+what it was actually built with. Moving a release to a newer compiler is
+therefore a commit, not a Tuesday.
+
+That makes a release repeatable in the ways this repository controls: the
+same source, the same dependency versions from `Cargo.lock`, the same
+compiler, the same `cross` and the same actions. It does not make the
+binaries bit-for-bit reproducible — the `cross` container images and the
+runner environment are outside it. `SOURCE_DATE_EPOCH` only fixes the build
+date `--version` prints.
+
+## crates.io credentials
+
+There are none. The publish job authenticates with
+[Trusted Publishing](https://crates.io/docs/trusted-publishing): it asks
+GitHub for an OIDC token naming the repository and the workflow file, and
+`rust-lang/crates-io-auth-action` trades that with crates.io for a registry
+token that lasts 30 minutes and is revoked when the job ends. That is what
+`id-token: write` on the job is for; it grants nothing in this repository.
+
+The crate side is one-time setup, and only an owner of the crate can do it,
+under the crate's Settings → Trusted Publishing → Add, publisher GitHub:
+
+| Field | Value |
+| --- | --- |
+| Repository owner | `librespeed` |
+| Repository name | `speedtest-cli-rust` |
+| Workflow filename | `release.yml` |
+| Environment name | leave empty |
+
+The environment field is optional, and left empty it mints a token for any
+run of that workflow on this repository. Naming one would narrow that
+further, but only an environment with protection rules is worth the second
+place to keep in step, and configuring those needs repository admin.
+
+Trusted Publishing cannot be configured for a crate that does not exist yet,
+so the first version went out with an API token from
+<https://crates.io/settings/tokens>, stored as the repository secret
+`CARGO_REGISTRY_TOKEN`. Nothing reads that secret any more and it can be
+deleted.
