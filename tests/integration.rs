@@ -891,8 +891,22 @@ fn help_carries_the_go_clients_option_texts() {
     ] {
         assert!(flat.contains(text), "missing from --help: {text}\n{flat}");
     }
-    // The one option this port adds is documented too.
-    assert!(flat.contains("--http2"), "{flat}");
+    // The one option this port adds is documented too, where it is built in.
+    assert_eq!(flat.contains("--http2"), cfg!(feature = "http2"), "{flat}");
+}
+
+// A build without the `http2` feature has no h2 to offer, so it says so
+// instead of quietly running the test over HTTP/1.1.
+#[cfg(not(feature = "http2"))]
+#[test]
+fn http2_is_refused_where_it_is_not_built_in() {
+    let out = run(&["--http2", "--list"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("this build has no HTTP/2 support, so --http2 cannot be used"),
+        "{stderr}"
+    );
 }
 
 // The debug log carries the Go client's lines and no others, and names the

@@ -1,107 +1,32 @@
 # librespeed-cli (Rust)
 
-A command line interface for [LibreSpeed](https://github.com/librespeed/speedtest), written in Rust.
+[![CI](https://github.com/librespeed/speedtest-cli-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/librespeed/speedtest-cli-rust/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/librespeed-cli.svg)](https://crates.io/crates/librespeed-cli)
+[![License](https://img.shields.io/crates/l/librespeed-cli.svg)](LICENSE)
 
-LibreSpeed ships two backend implementations — one in Go
-([speedtest-go](https://github.com/librespeed/speedtest-go)) and one in Rust
-([speedtest-rust](https://github.com/librespeed/speedtest-rust)) — but the CLI
-existed only in Go. This is a port of
-[librespeed/speedtest-cli](https://github.com/librespeed/speedtest-cli) to Rust,
-addressing [issue #105](https://github.com/librespeed/speedtest-cli/issues/105).
+Command line client for [LibreSpeed](https://github.com/librespeed/speedtest),
+a Rust port of the Go [librespeed-cli](https://github.com/librespeed/speedtest-cli)
+([issue #105](https://github.com/librespeed/speedtest-cli/issues/105)).
 
-It speaks the same protocol as the Go CLI and works against any LibreSpeed
-backend, Go or Rust.
+- Same protocol, options and output formats as the Go client.
+- Works against any LibreSpeed backend, [Go](https://github.com/librespeed/speedtest-go)
+  or [Rust](https://github.com/librespeed/speedtest-rust).
+- Runs where Go does not, such as the 32-bit PowerPC in Turris 1.x routers.
 
-## Status
+## Install
 
-Feature-complete with the Go CLI: every command line flag is implemented,
-including telemetry/`--share`, JSON and CSV reports, ICMP and HTTP ping,
-IPv4/IPv6 forcing, source-address, interface and firewall-mark socket binding,
-custom CA bundles, and the server list filters.
+| Where | How |
+| --- | --- |
+| OpenWrt | `apk add librespeed-cli-rust`, on 24.10 `opkg install librespeed-cli-rust` |
+| Cargo | `cargo install --locked librespeed-cli` |
+| Linux binaries | [Releases](https://github.com/librespeed/speedtest-cli-rust/releases) for x86_64, aarch64, armv7 and arm (musl) |
+| From source | `cargo build --release`, the binary is `target/release/librespeed-cli` |
 
-Agreement with the Go client is a test rather than a claim. `tests/parity`
-runs both binaries against the same in-process backend and compares their
-output, their error output and their exit status. For every case it declares
-either that the two agree or exactly which lines differ and which entry of the
-list below accounts for them, so an undocumented difference fails the run and
-so does one that quietly went away. CI builds the Go client from the commit
-`tests/parity/cases.rs` names and runs the comparison against it.
-
-What it shows, once the measured numbers are set aside -- those differ between
-any two runs: `--list`, `--csv-header`, `--simple`, `--csv`, `--json`,
-`--json-stream` and the `--debug` lines agree, and so do the usage errors, the
-error lines and the exit status of a failed run. The text columns are the
-exception, because what a server says about itself is rewritten on its way
-into a report; the first entry below says how. In `--help` every option the Go
-client has reads the same apart from a typo corrected in `--telemetry-json`,
-`--http2` is an option it does not have, and `--version` names this repository
-instead of the Go one.
-
-## Building
-
-```sh
-cargo build --release
-```
-
-The binary lands in `target/release/librespeed-cli`. Set `SOURCE_DATE_EPOCH` for
-a reproducible build date in `--version`.
-
-### TLS backends
-
-| Feature | Crypto | System dependency | Architectures |
-| --- | --- | --- | --- |
-| `rustls-tls` (default) | rustls + ring | none, statically linked | anything |
-| `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
-
-`ring` builds everywhere, falling back to portable C where it has no
-hand-written assembly, which is everything outside x86, x86_64, aarch64 and
-arm. On a core with no crypto instructions that costs throughput, so the
-OpenSSL backend is the better choice there. Measured on the e500v2 in a
-Turris 1.x, 8 KiB buffers:
-
-| | ring | OpenSSL |
-| --- | --- | --- |
-| ChaCha20-Poly1305 | 48.6 MB/s | 46.9 MB/s |
-| AES-128-GCM | 8.5 MB/s | 18.8 MB/s |
-
-ChaCha20 in portable C already matches the assembly; AES does not, and AES is
-what servers pick. An HTTPS run against a backend negotiating AES-256-GCM
-measured 138 Mbps with OpenSSL against 37 Mbps with rustls. Build the OpenSSL
-backend for such targets:
-
-```sh
-cargo build --release --no-default-features --features native-tls
-```
-
-### OpenWrt and Turris
-
-The Go CLI cannot run on 32-bit PowerPC at all — Go's toolchain only targets
-`ppc64` and `ppc64le`, which is why LibreSpeed's CLI is packaged for Turris
-Omnia and MOX but not for Turris 1.x. Rust does reach that hardware through the
-Tier 3 `powerpc-unknown-linux-muslspe` target that the OpenWrt build system
-supports, so this port can go where the Go one cannot.
-
-Build it against the OpenWrt SDK with the OpenSSL backend, for the throughput
-reason above and because it links against the libopenssl already in the image
-rather than carrying its own:
-
-```sh
-cargo build --release --no-default-features --features native-tls \
-  --target powerpc-unknown-linux-muslspe
-```
-
-Being a Tier 3 target, `powerpc-unknown-linux-muslspe` has no prebuilt `std`, so
-it needs a nightly toolchain with `-Z build-std` — which is what OpenWrt's Rust
-packaging already arranges. Point the `openssl` crate at the SDK's OpenSSL via
-`OPENSSL_DIR`, or let `pkg-config` find it through the SDK environment.
+Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. It
+fixes only the date and does not make the binary bit-for-bit reproducible, see
+[RELEASING.md](RELEASING.md#how-to-release).
 
 ## Usage
-
-```
-librespeed-cli [OPTIONS]
-```
-
-Run `librespeed-cli --help` for the full list. The common ones:
 
 ```sh
 # Test against the automatically selected fastest server
@@ -126,83 +51,139 @@ librespeed-cli --interface eth1
 librespeed-cli --fwmark 42          # Linux only
 ```
 
+> [!TIP]
+> `librespeed-cli --help` lists every option.
+
+## TLS backends
+
+| Feature | Crypto | Links against | Architectures |
+| --- | --- | --- | --- |
+| `rustls-tls` (default) | rustls + ring | nothing, static | anything, with assembly on x86, x86_64, aarch64 and arm |
+| `native-tls` | system OpenSSL | libopenssl | anything OpenSSL builds for |
+
+```sh
+cargo build --release --no-default-features --features native-tls,http2
+```
+
+HTTP/2 is the `http2` feature, on by default. `--no-default-features` drops it
+as well, so name it again if `--http2` is wanted. A build without it is smaller
+and refuses `--http2`.
+
+> [!IMPORTANT]
+> `ring` has assembly only for x86, x86_64, aarch64 and arm. Elsewhere it runs
+> portable C. On a slow core without crypto instructions that can cost enough
+> throughput for a speed test to measure the CPU instead of the link, and the
+> OpenSSL backend is the better choice there.
+>
+> One measurement, on the e500v2 of a Turris 1.x: an HTTPS run against a
+> backend negotiating AES-256-GCM reached 138 Mbps with OpenSSL and 37 Mbps
+> with rustls. AES-128-GCM alone, with 8 KiB buffers, does 18.8 MB/s with
+> OpenSSL and 8.5 MB/s with ring. Other CPUs will give other numbers.
+
+## OpenWrt and Turris
+
+The Go client cannot run on 32-bit PowerPC, because Go targets only `ppc64` and
+`ppc64le`. Rust reaches that hardware through the Tier 3 target
+`powerpc-unknown-linux-muslspe`, so this port also covers Turris 1.x.
+
+The OpenWrt package `librespeed-cli-rust` builds the `native-tls` backend with
+`--no-default-features` and depends on `libopenssl`. That leaves HTTP/2 out,
+as in the Turris build below, while a plain `cargo build` has it.
+
+To build for Turris 1.x by hand:
+
+```sh
+cargo build --release --no-default-features --features native-tls \
+  --target powerpc-unknown-linux-muslspe
+```
+
+A Tier 3 target has no prebuilt `std`, so this needs a nightly toolchain with
+`-Z build-std`, which OpenWrt's Rust packaging arranges. Point the `openssl`
+crate at the SDK's OpenSSL with `OPENSSL_DIR`, or let `pkg-config` find it
+through the SDK environment.
+
+## Parity with the Go client
+
+Every option of the Go client is implemented, including telemetry and `--share`,
+JSON and CSV reports, ICMP and HTTP ping, IPv4 and IPv6 forcing, source address,
+interface and firewall mark binding, custom CA bundles and the server list
+filters.
+
+> [!NOTE]
+> Agreement is a test, not a claim. `tests/parity` runs both binaries against
+> the same backend and compares their output, error output and exit status.
+> A difference that is not in the list below fails CI, and so does a listed one
+> that went away.
+
+| Compared | Result |
+| --- | --- |
+| Reports and errors | Same: `--list`, `--csv-header`, `--simple`, `--csv`, `--json`, `--json-stream`, the `--debug` lines, usage errors, error lines and the exit status of a failed run |
+| `--help` | Every shared option reads the same apart from a typo corrected in `--telemetry-json` |
+| Only here | `--http2`, and `--version` names this repository instead of the Go one |
+
 ## Differences from the Go implementation
 
-The protocol, the flags and the output formats match. These behaviours are
-deliberately different:
+The protocol, the options and the output formats match. These behaviours are
+deliberately different.
 
-- **Everything a server says is sanitized.** Server names, sponsor strings,
-  addresses and the backend's getIP answer are attacker-influenced text. The
-  control characters (C0, DEL, C1), the line and paragraph separators, every
-  Unicode format character — bidi overrides, zero-width joiners, the soft
-  hyphen, the Arabic letter mark, the byte order mark — and the invisible tag
-  block are dropped before any of it is printed, in terminal output, in CSV and
-  in JSON alike. Spacing characters such as no-break space are kept: they
-  render, and dropping them would run words together and misreport a name. The
-  Go client cleans C0, DEL and C1 from its terminal output only, so its CSV and
-  JSON carry escape sequences and bidi overrides straight through. A text
-  column here is therefore a transformation of what the server sent rather than
-  an escaping of it: the characters are removed, not encoded, and in CSV a
-  field that would start a formula gains a leading apostrophe as well. Neither
-  is reversible, which is the point -- nothing downstream can be steered by
-  what a server called itself.
-- **CSV formulas are defused.** A field starting with `=`, `+`, `-` or `@` is
-  prefixed with a single quote, because spreadsheets strip the CSV quoting and
-  then evaluate what is left.
-- **CSV quoting follows the csv crate.** Go also quotes a field that starts
-  with a space or is exactly `\.`; here only the delimiter, a quote or a line
-  break causes quoting.
-- **Response sizes are capped.** A server list and a getIP answer are read to
-  8 MiB and a telemetry reply to 64 KiB, rather than to whatever the peer
-  decides to send, and the check that a backend is up reads no more than 8 KiB
-  of its answer. The cap bounds memory and not time: a peer that stays under it
-  while sending slowly is left to the request timeout, and `--timeout 0` leaves
-  no time bound at all.
-- **A redirect may not leave https for http.** A server reached over https
-  that answers with a `Location` on http is an error: the request was made
-  over TLS deliberately, and following the downgrade would put the rest of
-  the exchange on the wire in clear. Go follows it, leaving out only the
-  Referer. A redirect that stays on http, and one that stays on https, is
-  followed as it is in Go.
+### Security
+
+- **Everything a server says is sanitized.** Server names, sponsors, addresses
+  and the getIP answer lose their control characters, Unicode format characters
+  such as bidi overrides and zero-width joiners, and the invisible tag block,
+  in terminal, CSV and JSON output alike. The characters are removed, not
+  escaped. Go cleans only C0, DEL and C1, and only in terminal output.
+- **CSV formulas are defused.** A field starting with `=`, `+`, `-` or `@` gets
+  a leading single quote, because spreadsheets evaluate what is left after
+  unquoting.
+- **Response sizes are capped.** 8 MiB for a server list or a getIP answer,
+  64 KiB for a telemetry reply and 8 KiB for the check that a backend is up.
+  The cap bounds memory, not time, and `--timeout 0` leaves no time bound.
+- **A redirect may not leave https for http.** It is an error here. Go follows
+  it and only leaves out the Referer.
 - **A request body is not sent on to another origin.** A 307 or 308 that would
-  send the telemetry POST to another scheme, host or port is refused, because
-  the POST carries the measurement, the client's address and its ISP; Go sends
-  the body on. A redirected request also carries no Referer.
+  move the telemetry POST to another scheme, host or port is refused, because
+  the POST carries the measurement, the client's address and its ISP. Go sends
+  it on. A redirected request also carries no Referer.
 - **A telemetry reply other than 2xx fails the upload.** The error names the
-  HTTP status, and no share link is printed. Go does not check the status: it
-  takes a share ID from any body with exactly one space in it, so a 500 reply
-  can still yield a share link.
-- **HTTP/1.1 by default, HTTP/2 behind `--http2`.** HTTP/2 carries every stream
-  over one TCP connection, so `--concurrent` would stop meaning concurrent
-  connections — and multiple connections is the standard way a speed test
-  saturates a link. Go's client negotiates h2 whenever a server offers it.
-  `--http2` enables it here too, with the flow-control windows raised to what
-  Go's transport uses (4 MiB per stream, 1 GiB per connection); the protocol
-  default of 64 KiB caps a stream at window/RTT, about 105 Mbps at 5 ms.
-- **Scheme-less server URLs with a port work.** `example.com/backend` becomes
-  `http://example.com/backend` in both clients, but Go's URL parser takes
-  `example.com:8080/backend` for a URL whose scheme is `example.com`, and
-  `127.0.0.1:8080/` makes it reject the whole list. Here both become `http://`
-  URLs.
-- **`--interface` works on macOS** via `IP_BOUND_IF`; the Go version supports
-  interface binding on Linux only. `--fwmark` remains Linux-only (`SO_MARK`).
-- **Numbers the Go client cannot act on are refused.** It accepts any int64 and
-  then panics on `--upload-size -1` or wraps a `--duration` past the
-  `time.Duration` range. Here a negative value, a duration or timeout past that
-  range, and a count, size or mark past 32 bits are refused as out of range;
-  Go instead gives a negative `--concurrent` its own message and ignores a
-  negative `--fwmark`. A negative `--server` or `--exclude` is still taken, so
-  `--server -1` tests every server as it does in Go. Zero `--duration`,
-  `--chunks` and `--upload-size` run as they do in Go.
+  HTTP status and no share link is printed. Go takes a share ID from any body
+  with exactly one space in it, so a 500 reply can still yield a link.
 - **TLS verification is stricter.** rustls rejects a self-signed certificate
-  presented as both the leaf and its own trust anchor even when passed via
-  `--ca-cert`. A normal private CA works; use `--skip-cert-verify` for the
-  degenerate case.
-- **The process exits rather than returning from `main`.** Dropping the tokio
-  runtime joins its worker threads, and on 32-bit PowerPC musl (Turris 1.x)
-  that never completed: every successful run hung after printing its output.
-  `process::exit(0)` at the end of `main` is a workaround, still under
-  investigation; all output is flushed as it is written, so nothing is lost.
+  that is both the leaf and its own trust anchor, even with `--ca-cert`.
+  A normal private CA works, and `--skip-cert-verify` covers the other case.
+
+### Behaviour
+
+- **HTTP/1.1 by default, HTTP/2 behind `--http2`.** HTTP/2 carries every stream
+  over one TCP connection, so `--concurrent` would stop meaning connections.
+  Go negotiates h2 whenever a server offers it. With `--http2` the flow-control
+  windows are raised to Go's values, 4 MiB per stream and 1 GiB per connection.
+  A build without the `http2` feature refuses the option.
+- **Scheme-less server URLs with a port work.** `example.com:8080/backend`
+  becomes an `http://` URL. Go takes `example.com` for the scheme, and
+  `127.0.0.1:8080/` makes it reject the whole list.
+- **`--interface` works on macOS** through `IP_BOUND_IF`. Go binds interfaces
+  on Linux only. `--fwmark` stays Linux-only (`SO_MARK`).
+- **Numbers the Go client cannot act on are refused.** A negative value,
+  a duration or timeout past the `time.Duration` range, and a count, size or
+  mark past 32 bits are out of range. Go panics on `--upload-size -1`.
+  A negative `--server` or `--exclude` is still taken, so `--server -1` tests
+  every server as it does in Go.
+- **CSV quoting follows the csv crate.** Only the delimiter, a quote or a line
+  break causes quoting. Go also quotes a field that starts with a space or is
+  exactly `\.`.
+- **Error causes use this client's libraries' words.** The prefixes match Go,
+  such as `Error when fetching server list:`. The cause after them, a refused
+  connection or a JSON syntax error, reads differently.
+- **A server URL's scheme keeps its case.** Go lowercases `HTTP://` when it
+  parses the list.
+- **The process exits rather than returning from `main`.** On 32-bit PowerPC
+  musl, dropping the tokio runtime never finished and every run hung after its
+  output. `main` ends with `process::exit(0)` as a workaround. Output is flushed
+  as it is written, so nothing is lost.
+
+### Command line
+
 - **Go's command line quirks are not copied.** The command line is parsed by
   clap, so:
   - `-json` is not `--json`: long options take two dashes.
@@ -210,59 +191,39 @@ deliberately different:
   - An argument that is not an option is refused. Go ignores it, and every
     option after it.
   - An option other than `--server` and `--exclude` given twice is refused,
-    and `--server 1,2` is not split into two servers; Go keeps the last value
+    and `--server 1,2` is not split into two servers. Go keeps the last value
     and splits the list.
   - A boolean option takes no value, so `--json=false` is refused.
   - `--csv-delimiter` must be one ASCII character other than `"`. Go uses the
-    first character of a longer value, and with `"` prints no header and no
-    rows.
+    first character of a longer value.
   - `--help` is answered as soon as it is seen, even if an unknown option
-    follows; Go reports the unknown option.
-  - Rarer usage errors read differently: a repeated option or `--ipv4 -4`,
+    follows. Go reports the unknown option.
+  - Rarer usage errors read differently: a repeated option, `--ipv4 -4`,
     `---list`, `--json-stream` with `--json` or `--csv`, and `--server` with
-    `--exclude`, which Go reports as "incompatible options" and "either
-    --exclude or --server can be used" (`--specific` for a local list).
+    `--exclude`.
   - A malformed or out-of-range `--server` or `--exclude` value ends in
-    `parse error` or `value out of range`, as any other number does; Go puts
-    strconv's message there, such as `strconv.ParseInt: parsing "x": invalid
-    syntax`.
-- **Error causes use this client's libraries' words.** The prefixes match Go
-  (`Error when fetching server list:`, `Terminated due to error:` and the
-  rest), but a cause such as a refused connection or a JSON syntax error reads
-  differently after them.
-- **A server URL's scheme keeps its case.** Go lowercases `HTTP://` when it
-  parses the list; `--list` and the reports show it here as the list gave it.
+    `parse error` or `value out of range`. Go prints strconv's message.
 
 ## Testing
 
 ```sh
-cargo test          # unit + end-to-end tests
+cargo test
 cargo clippy --all-targets
 cargo fmt --check
 ```
 
-`tests/integration.rs` starts an in-process LibreSpeed backend and drives the
-built binary against it, covering the whole flow — server list, ping, download,
-upload, telemetry and every output mode — with no network access, including the
-Go client's error messages and what a backend full of hostile text does not get
-to print. The unit tests cover the jitter estimator, Go-compatible path joining,
-rounding, timestamps, CSV and JSON rendering, server list filtering and URL
-scheme handling.
+| Suite | What it covers |
+| --- | --- |
+| `tests/integration.rs` | The whole flow against an in-process backend, with no network: server list, ping, download, upload, telemetry and every output mode |
+| `tests/golden.rs` | Report rendering against data the Go standard library wrote |
+| `tests/parity` | The differential test against the Go client |
+| unit tests | Jitter, path joining, rounding, timestamps, CSV and JSON rendering, server list filters and URL schemes |
 
-`tests/golden.rs` checks the report rendering against data Go itself wrote.
-`tools/golden/main.go` runs `encoding/json`, `strconv` and `time` — the
-packages the Go client renders its reports with — over a corpus of floats,
-timestamps and whole documents, and the test feeds the same inputs to this
-client. Only the recorded data is needed, so it runs everywhere; regenerating
-it needs Go:
+<details>
+<summary>Running the parity test by hand</summary>
 
-```sh
-go run tools/golden/main.go tests/data
-```
-
-`tests/parity` is the differential test the Status section describes. Without
-`LIBRESPEED_GO_BIN` it skips the comparison and prints why, so a plain
-`cargo test` still passes; CI sets it, and by hand it is:
+Without `LIBRESPEED_GO_BIN` the comparison is skipped and says why, so a plain
+`cargo test` passes. CI sets it.
 
 ```sh
 # GO_COMMIT is the commit tests/parity/cases.rs names.
@@ -272,103 +233,28 @@ git -C go-client checkout "$GO_COMMIT"
 LIBRESPEED_GO_BIN=$PWD/go-client/librespeed-go cargo test --test parity
 ```
 
+</details>
+
+<details>
+<summary>Regenerating the golden data</summary>
+
+Only the recorded data is needed to run the test. Regenerating it needs Go:
+
+```sh
+go run tools/golden/main.go tests/data
+```
+
+</details>
+
 ## Releasing
 
 [RELEASING.md](RELEASING.md) says when a release goes out, when one goes to
-OpenWrt, and how dependencies are kept up to date.
-
-### How to release
-
-A release is a tag. Bump `version` in `Cargo.toml`, run `cargo update --workspace`
-so that `Cargo.lock` follows, commit both, then:
-
-```sh
-git tag -a v1.2.1 -m "librespeed-cli 1.2.1"
-git push origin v1.2.1
-```
-
-The tag starts [release.yml](.github/workflows/release.yml), which runs in
-one chain and stops at the first step that fails:
-
-1. **Resolve the commit** turns the tag into a commit, once. Every step
-   after it is handed that commit instead of resolving the tag again, so a
-   tag that moves mid-release cannot split the run across two of them.
-2. **Checks** run [ci.yml](.github/workflows/ci.yml) against that commit:
-   tests on three platforms, both TLS backends, the minimum supported Rust
-   version, lint, the fuzz targets, the differential test against the Go
-   client and `cargo package`, and a tag with a known advisory in its
-   `Cargo.lock` stops too. Nothing is built or published until they pass.
-3. **Package the crate** verifies the tag against `version` in `Cargo.toml`
-   and builds the `.crate` once, recording its SHA-256. A tag that disagrees
-   stops the run here, before a release exists to leave behind.
-4. **Build** cross-builds the musl binaries.
-5. **Publish release** attaches the tarballs and `SHA256SUMS` to a GitHub
-   release.
-6. **Publish to crates.io** checks the tag again against the commit it is
-   about to upload, rebuilds the crate and refuses to publish unless it comes
-   out byte for byte the one step 3 validated. `cargo` cannot upload a
-   `.crate` it did not just build, so this comparison is what ties the two
-   together. A dry run goes first, so a crate that cannot be published is
-   distinguishable from an upload that failed. Only then does the job ask
-   crates.io for a publishing token, through Trusted Publishing.
-
-Running the workflow by hand rebuilds the binaries for a tag that is already
-out; that path never publishes.
-
-The tag is checked again before the GitHub release is cut and once more
-immediately before the upload, because a run takes long enough for a tag to
-move. That is detection, not a lock: a tag can still move a moment after a
-check returns. Protecting `v*` tags against force-pushes and deletion with a
-repository ruleset is what prevents it, and these checks catch what slips past.
-
-Releases are built with the compiler named in `RELEASE_TOOLCHAIN`, with
-`cross` pinned to a version, and with every action pinned to a commit. CI
-keeps using whatever `stable` is that day: the two answer different
-questions, CI that the code has not fallen behind the compiler, a release
-what it was actually built with. Moving a release to a newer compiler is
-therefore a commit, not a Tuesday.
-
-That makes a release repeatable in the ways this repository controls: the
-same source, the same dependency versions from `Cargo.lock`, the same
-compiler, the same `cross` and the same actions. It does not make the
-binaries bit-for-bit reproducible — the `cross` container images and the
-runner environment are outside it. `SOURCE_DATE_EPOCH` only fixes the build
-date `--version` prints.
-
-### crates.io credentials
-
-There are none. The publish job authenticates with
-[Trusted Publishing](https://crates.io/docs/trusted-publishing): it asks
-GitHub for an OIDC token naming the repository and the workflow file, and
-`rust-lang/crates-io-auth-action` trades that with crates.io for a registry
-token that lasts 30 minutes and is revoked when the job ends. That is what
-`id-token: write` on the job is for; it grants nothing in this repository.
-
-The crate side is one-time setup, and only an owner of the crate can do it,
-under the crate's Settings → Trusted Publishing → Add, publisher GitHub:
-
-| Field | Value |
-| --- | --- |
-| Repository owner | `librespeed` |
-| Repository name | `speedtest-cli-rust` |
-| Workflow filename | `release.yml` |
-| Environment name | leave empty |
-
-The environment field is optional, and left empty it mints a token for any
-run of that workflow on this repository. Naming one would narrow that
-further, but only an environment with protection rules is worth the second
-place to keep in step, and configuring those needs repository admin.
-
-Trusted Publishing cannot be configured for a crate that does not exist yet,
-so the first version went out with an API token from
-<https://crates.io/settings/tokens>, stored as the repository secret
-`CARGO_REGISTRY_TOKEN`. Nothing reads that secret any more and it can be
-deleted.
+OpenWrt, how dependencies are kept up to date and how a tag becomes a release.
 
 ## License
 
 GNU Lesser General Public License v3.0, the same as the Go implementation. See
 [LICENSE](LICENSE).
 
-- LibreSpeed — Copyright (C) 2016-2020 Federico Dossena
-- librespeed-cli — Copyright (C) 2020 Maddie Zhan
+- LibreSpeed, Copyright (C) 2016-2020 Federico Dossena
+- librespeed-cli, Copyright (C) 2020 Maddie Zhan

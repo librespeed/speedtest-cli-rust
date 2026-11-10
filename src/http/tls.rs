@@ -1,10 +1,10 @@
 //! TLS backend selection.
 //!
-//! Two backends are available, because `ring` — the crypto provider behind
-//! rustls — supports only x86, x86_64, aarch64, arm and wasm32, and fails the
-//! build outright on anything else. Platforms outside that set (notably the
-//! 32-bit PowerPC e500v2 in CZ.NIC Turris 1.x routers) can link against the
-//! system OpenSSL instead:
+//! Two backends are available, because `ring`, the crypto provider behind
+//! rustls, has assembly only for x86, x86_64, aarch64 and arm. Elsewhere it
+//! runs portable C, which is slow on a core without crypto instructions.
+//! Platforms outside that set (notably the 32-bit PowerPC e500v2 in CZ.NIC
+//! Turris 1.x routers) can link against the system OpenSSL instead:
 //!
 //! ```sh
 //! cargo build --release --no-default-features --features native-tls
@@ -269,7 +269,8 @@ mod imp {
     fn client_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-        // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
+        // ALPN is left to hyper-rustls: `enable_all_versions()` offers h2 and
+        // http/1.1, `enable_http1()` alone offers nothing.
         if tls.skip_verify {
             // Say so rather than ignoring the bundle in silence: a run that
             // named a CA file and verified nothing looks like a run that
@@ -322,15 +323,20 @@ mod imp {
             .https_or_http();
 
         // ALPN decides the protocol, so h2 is only reachable when offered here.
-        Ok(ReportingConnector(if tls.http2 {
-            builder
-                .enable_all_versions()
-                .wrap_connector(BoundConnector::new(bind))
-        } else {
+        #[cfg(feature = "http2")]
+        if tls.http2 {
+            return Ok(ReportingConnector(
+                builder
+                    .enable_all_versions()
+                    .wrap_connector(BoundConnector::new(bind)),
+            ));
+        }
+
+        Ok(ReportingConnector(
             builder
                 .enable_http1()
-                .wrap_connector(BoundConnector::new(bind))
-        }))
+                .wrap_connector(BoundConnector::new(bind)),
+        ))
     }
 }
 
@@ -370,7 +376,7 @@ mod imp {
             builder.disable_built_in_roots(true);
         }
 
-        if tls.http2 {
+        if cfg!(feature = "http2") && tls.http2 {
             builder.request_alpns(&["h2", "http/1.1"]);
         }
 

@@ -37,6 +37,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --verbose
       - run: cargo test --verbose
+      # The default backend without HTTP/2, which no other job tests.
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --no-default-features --features rustls-tls --verbose
 
   native-tls:
     name: Test with the OpenSSL backend
@@ -50,6 +53,9 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --no-default-features --features native-tls --verbose
+      # With HTTP/2 this backend offers h2 through OpenSSL's ALPN, which
+      # tests/alpn.rs checks against a TLS server.
+      - run: cargo test --no-default-features --features native-tls,http2 --verbose
 
   msrv:
     name: Minimum supported Rust version
@@ -72,7 +78,9 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo check --all-targets
+      - run: cargo check --all-targets --no-default-features --features rustls-tls
       - run: cargo check --all-targets --no-default-features --features native-tls
+      - run: cargo check --all-targets --no-default-features --features native-tls,http2
 
   fuzz:
     name: Fuzz targets build
