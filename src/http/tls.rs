@@ -1,10 +1,10 @@
 //! TLS backend selection.
 //!
-//! Two backends are available, because `ring` — the crypto provider behind
-//! rustls — supports only x86, x86_64, aarch64, arm and wasm32, and fails the
-//! build outright on anything else. Platforms outside that set (notably the
-//! 32-bit PowerPC e500v2 in CZ.NIC Turris 1.x routers) can link against the
-//! system OpenSSL instead:
+//! Two backends are available, because `ring`, the crypto provider behind
+//! rustls, has assembly only for x86, x86_64, aarch64 and arm. Elsewhere it
+//! runs portable C, which is slow on a core without crypto instructions.
+//! Platforms outside that set (notably the 32-bit PowerPC e500v2 in CZ.NIC
+//! Turris 1.x routers) can link against the system OpenSSL instead:
 //!
 //! ```sh
 //! cargo build --release --no-default-features --features native-tls

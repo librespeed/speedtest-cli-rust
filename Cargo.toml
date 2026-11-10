@@ -44,16 +44,18 @@ path = "src/main.rs"
 [features]
 default = ["rustls-tls"]
 # rustls with the ring crypto provider. Statically linked, no system TLS
-# library needed, but ring builds only for x86, x86_64, aarch64, arm and wasm32.
+# library needed. ring has assembly only for x86, x86_64, aarch64 and arm and
+# runs portable C elsewhere, which is slow on a core without crypto instructions.
 rustls-tls = [
     "dep:hyper-rustls",
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
 ]
-# Link against the system OpenSSL instead. Required on targets ring does not
-# support, such as the 32-bit PowerPC e500v2 in Turris 1.x routers. This is what
-# OpenWrt packaging wants: it reuses the libopenssl already in the image.
+# Link against the system OpenSSL instead. Faster where ring has no assembly,
+# such as the 32-bit PowerPC e500v2 in Turris 1.x routers. This is what OpenWrt
+# packaging uses: it depends on the libopenssl package instead of carrying a
+# TLS library of its own.
 native-tls = ["dep:hyper-tls", "dep:native-tls", "dep:tokio-native-tls"]
 
 [dependencies]
