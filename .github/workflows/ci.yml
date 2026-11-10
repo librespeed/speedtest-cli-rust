@@ -53,8 +53,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --no-default-features --features native-tls --verbose
-      # HTTP/2 over this backend is negotiated through OpenSSL's ALPN, and no
-      # other job builds the two together.
+      # With HTTP/2 this backend offers h2 through OpenSSL's ALPN, which
+      # tests/alpn.rs checks against a TLS server.
       - run: cargo test --no-default-features --features native-tls,http2 --verbose
 
   msrv:

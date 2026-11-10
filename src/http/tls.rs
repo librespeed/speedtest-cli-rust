@@ -269,7 +269,8 @@ mod imp {
     fn client_config(tls: &TlsSettings<'_>) -> anyhow::Result<rustls::ClientConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-        // ALPN is left untouched: hyper-rustls sets it from `enable_http1()`.
+        // ALPN is left to hyper-rustls: `enable_all_versions()` offers h2 and
+        // http/1.1, `enable_http1()` alone offers nothing.
         if tls.skip_verify {
             // Say so rather than ignoring the bundle in silence: a run that
             // named a CA file and verified nothing looks like a run that
