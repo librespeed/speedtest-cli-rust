@@ -141,7 +141,12 @@ impl Server {
         ));
 
         match result {
-            Ok((status, body, facts)) => {
+            Ok(crate::http::Prefix {
+                status,
+                body,
+                body_error,
+                facts,
+            }) => {
                 // Say what the connection settled on. On hardware without AES
                 // acceleration the cipher, not the link, is what bounds the
                 // result, and under TLS 1.3 the server picks it from the set
@@ -158,33 +163,16 @@ impl Server {
                     (None, _) => write_debug!(out, "Connection is not encrypted\n"),
                 }
 
-                if !body.is_empty() {
+                // A body that broke off is quoted too, with what it got, as
+                // the Go client does.
+                if body_error.is_some() || !body.is_empty() {
                     write_debug!(
                         out,
                         "Failed when parsing get IP result: {}\n",
                         GoQuote(&body)
                     );
                 }
-                // Status first: a web server's 404 or 500 comes with an error
-                // page, and the status names that fault better than the body.
-                let down_reason = if status != StatusCode::OK {
-                    let code = status.as_u16();
-                    Some(match go_status_text(status) {
-                        Some(text) => format!("the ping request returned HTTP {code} {text}"),
-                        None => format!("the ping request returned HTTP {code}"),
-                    })
-                } else if !body.is_empty() {
-                    Some("the ping request returned a non-empty body".to_string())
-                } else {
-                    None
-                };
-                ServerStatus {
-                    up: down_reason.is_none(),
-                    down_reason,
-                    // As before, a probe answered with a body reports nothing
-                    // about its connection.
-                    tls: facts.tls.filter(|_| body.is_empty()),
-                }
+                ServerStatus::of_answer(status, &body, body_error, facts.tls)
             }
             Err(e) => {
                 write_debug!(out, "Error checking for server status: {e:#}\n");
@@ -652,8 +640,11 @@ fn go_status_text(status: StatusCode) -> Option<&'static str> {
 pub struct ServerStatus {
     pub up: bool,
     /// Why the backend is down, when it is: the refused connection, the
-    /// unreachable network, the wrong status or a body where none belongs.
+    /// unreachable network, the wrong status, a body where none belongs or a
+    /// body that broke off.
     pub down_reason: Option<String>,
+    /// What the probe's connection negotiated. Kept whatever the status, but
+    /// not for an answer that carried a body or broke off.
     pub tls: Option<crate::http::TlsFacts>,
 }
 
@@ -663,6 +654,38 @@ impl ServerStatus {
             up: false,
             down_reason: Some(reason),
             tls: None,
+        }
+    }
+
+    /// What a probe's answer says about its backend, decided as Go's
+    /// `CheckUp` decides it.
+    fn of_answer(
+        status: StatusCode,
+        body: &[u8],
+        body_error: Option<anyhow::Error>,
+        tls: Option<crate::http::TlsFacts>,
+    ) -> Self {
+        let complete_and_empty = body_error.is_none() && body.is_empty();
+        // Status first: a web server's 404 or 500 comes with an error page,
+        // and the status names that fault better than the body, or than a
+        // body that broke off.
+        let down_reason = if status != StatusCode::OK {
+            let code = status.as_u16();
+            Some(match go_status_text(status) {
+                Some(text) => format!("the ping request returned HTTP {code} {text}"),
+                None => format!("the ping request returned HTTP {code}"),
+            })
+        } else if let Some(e) = body_error {
+            Some(format!("reading the ping response: {e:#}"))
+        } else if !body.is_empty() {
+            Some("the ping request returned a non-empty body".to_string())
+        } else {
+            None
+        };
+        ServerStatus {
+            up: down_reason.is_none(),
+            down_reason,
+            tls: tls.filter(|_| complete_and_empty),
         }
     }
 }
@@ -981,6 +1004,30 @@ mod tests {
     #[test]
     fn sponsor_is_empty_without_a_name() {
         assert_eq!(Server::default().sponsor(Output::default()), "");
+    }
+
+    /// The probe's connection is reported whatever the status, but not for an
+    /// answer that carried a body or broke off.
+    #[test]
+    fn a_probe_reports_its_connection_unless_its_answer_had_a_body_or_broke_off() {
+        let broke = || Some(anyhow::anyhow!("unexpected EOF"));
+        for (status, body, body_error, up, tls) in [
+            (StatusCode::OK, &b""[..], None, true, true),
+            (StatusCode::NOT_FOUND, b"", None, false, true),
+            (StatusCode::OK, b"x", None, false, false),
+            (StatusCode::NOT_FOUND, b"x", None, false, false),
+            (StatusCode::OK, b"", broke(), false, false),
+            (StatusCode::NOT_FOUND, b"x", broke(), false, false),
+        ] {
+            let case = format!("{status} {body:?} {body_error:?}");
+            let facts = crate::http::TlsFacts {
+                version: "TLSv1.3".into(),
+                cipher: "TLS_AES_128_GCM_SHA256".into(),
+            };
+            let s = ServerStatus::of_answer(status, body, body_error, Some(facts));
+            assert_eq!(s.up, up, "{case}");
+            assert_eq!(s.tls.is_some(), tls, "{case}");
+        }
     }
 
     // Go's net/http status table, where it differs from the http crate's, a

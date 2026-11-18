@@ -891,6 +891,44 @@ fn garbled() -> Vec<Case> {
                 "--simple",
             ],
         ),
+        // A probe answer that breaks off: the status still decides, and only
+        // a 200 is reported by the read that failed, in each client's words.
+        listed("truncated_404_probe", GARBLED, &["--server", "4", "--json", "--debug"]),
+        listed("stalled_404_probe", GARBLED, &["--timeout", "1", "--server", "5", "--json", "--debug"]),
+        listed("truncated_probe", GARBLED, &["--server", "6", "--json", "--debug"])
+        .stderr(
+            &[Why::ErrorCauses],
+            &[
+                "Terminated due to error: Selected server Truncated probe (127.0.0.1) is not responding: reading the ping response: unexpected EOF",
+            ],
+            &[
+                "Terminated due to error: Selected server Truncated probe (127.0.0.1) is not responding: reading the ping response: error reading a body from connection: end of file before message length reached",
+            ],
+        ),
+        listed("stalled_probe", GARBLED, &["--timeout", "1", "--server", "7", "--json", "--debug"])
+        .stderr(
+            &[Why::ErrorCauses],
+            &[
+                "Terminated due to error: Selected server Stalled probe (127.0.0.1) is not responding: reading the ping response: context deadline exceeded (Client.Timeout or context cancellation while reading body)",
+            ],
+            &[
+                "Terminated due to error: Selected server Stalled probe (127.0.0.1) is not responding: reading the ping response: request timed out after 1s",
+            ],
+        ),
+        listed("no_content_probe", GARBLED, &["--server", "8", "--json", "--debug"]),
+        listed("chunked_404_probe", GARBLED, &["--server", "9", "--json", "--debug"]),
+        listed("chunked_probe", GARBLED, &["--server", "10", "--json", "--debug"])
+        .stderr(
+            &[Why::ErrorCauses],
+            &[
+                "Terminated due to error: Selected server Chunked probe (127.0.0.1) is not responding: reading the ping response: unexpected EOF",
+            ],
+            &[
+                "Terminated due to error: Selected server Chunked probe (127.0.0.1) is not responding: reading the ping response: error reading a body from connection: unexpected EOF during chunk size line",
+            ],
+        ),
+        // Both read 512 bytes of a probe and quote them.
+        listed("long_probe", GARBLED, &["--server", "11", "--json", "--debug"]),
         telemetry("telemetry_500_id", "/telemetry-500-id.php")
         .stdout(
             &[Why::TelemetryStatus],

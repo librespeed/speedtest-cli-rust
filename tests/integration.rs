@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 const BIN: &str = env!("CARGO_BIN_EXE_librespeed-cli");
 const GARBAGE_LEN: usize = 2 * 1024 * 1024;
+/// How long a stalled answer stays silent: longer than the tests' one-second
+/// timeout, with room for a slow runner.
+const STALL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A mock LibreSpeed backend. Dropping it leaves the thread running; tests are
 /// short-lived processes, so that is fine.
@@ -161,6 +164,19 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
         stream.write_all(page.as_bytes())?;
         stream.flush()
     };
+    // A response that promises 64 bytes and sends only `sent`, then hangs up,
+    // or with `stall` goes quiet for longer than the client waits.
+    let broken_off =
+        |stream: &mut TcpStream, status: &str, sent: &[u8], stall: bool| -> std::io::Result<()> {
+            let head = format!("HTTP/1.1 {status}\r\nContent-Length: 64\r\n\r\n");
+            stream.write_all(head.as_bytes())?;
+            stream.write_all(sent)?;
+            stream.flush()?;
+            if stall {
+                std::thread::sleep(STALL);
+            }
+            Ok(())
+        };
 
     match (method.as_str(), path.as_str()) {
         (_, "/empty.php") => respond(&mut stream, b"", "text/plain")?,
@@ -194,6 +210,24 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
         // names neither the way the server put it.
         ("GET", "/too-large.php") => error_page(&mut stream, "413 Content Too Large")?,
         ("GET", "/unknown-status.php") => error_page(&mut stream, "599 Made Up")?,
+        // A body after a 204, where none can be: the status still decides.
+        ("GET", "/no-content.php") => error_page(&mut stream, "204 No Content")?,
+        // Answers that break off: ten bytes of a promised 64, then a hang-up
+        // or a silence longer than the tests' one-second timeout.
+        ("GET", p @ ("/truncated-error-page.php" | "/stalled-error-page.php")) => broken_off(
+            &mut stream,
+            "404 Not Found",
+            b"0123456789",
+            p.starts_with("/stalled"),
+        )?,
+        ("GET", p @ ("/truncated-ping.php" | "/stalled-ping.php")) => broken_off(
+            &mut stream,
+            "200 OK",
+            b"0123456789",
+            p.starts_with("/stalled"),
+        )?,
+        ("GET", "/cut-error-page.php") => broken_off(&mut stream, "404 Not Found", b"", false)?,
+        ("GET", "/cut-ping.php") => broken_off(&mut stream, "200 OK", b"", false)?,
         _ => {
             stream.write_all(
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1173,6 +1207,7 @@ fn a_server_answering_its_probe_wrongly_fails_the_run_with_what_it_answered() {
         ("server-error.php", "HTTP 500 Internal Server Error"),
         ("too-large.php", "HTTP 413 Request Entity Too Large"),
         ("unknown-status.php", "HTTP 599"),
+        ("no-content.php", "HTTP 204 No Content"),
         ("getIP.php", "a non-empty body"),
     ] {
         let list = write_server_list("probe-wrong", &[(1, "Wrong", backend.url(), ping)]);
@@ -1192,6 +1227,83 @@ fn a_server_answering_its_probe_wrongly_fails_the_run_with_what_it_answered() {
                 "Selected server Wrong (127.0.0.1) is not responding: the ping request returned {answered}"
             ),
             "{ping}"
+        );
+    }
+}
+
+// A probe answer that breaks off marks the backend down. A wrong status is
+// still what the error names, as in the Go client, and only a 200 is reported
+// by the read that failed, whether the peer hung up or the timeout ran out.
+#[test]
+fn a_probe_answer_that_breaks_off_is_named_by_its_status_first() {
+    const NOT_FOUND: &str = "the ping request returned HTTP 404 Not Found";
+    const TEN: &str = "\"0123456789\"";
+    let backend = MockBackend::start();
+    for (ping, answered, quoted) in [
+        ("truncated-error-page.php", NOT_FOUND, TEN),
+        ("cut-error-page.php", NOT_FOUND, "\"\""),
+        ("stalled-error-page.php", NOT_FOUND, TEN),
+        (
+            "stalled-ping.php",
+            "reading the ping response: request timed out after 1s",
+            TEN,
+        ),
+    ] {
+        let list = write_server_list("probe-broken", &[(1, "Broken", backend.url(), ping)]);
+        let out = run(&[
+            "--local-json",
+            list.to_str().unwrap(),
+            "--server",
+            "1",
+            "--no-icmp",
+            "--timeout",
+            "1",
+            "--json",
+            "--debug",
+        ]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{ping}: {stderr}");
+        assert_eq!(stdout_of(&out), "", "{ping}");
+        assert_eq!(
+            failure(&out),
+            format!("Selected server Broken (127.0.0.1) is not responding: {answered}"),
+            "{ping}"
+        );
+        // What arrived before the break is quoted, whatever the status.
+        assert!(
+            stderr.contains(&format!("\nFailed when parsing get IP result: {quoted}\n")),
+            "{ping}: {stderr}"
+        );
+    }
+
+    // A hang-up is worded by hyper, so only the prefix is ours. The debug line
+    // quotes what arrived, nothing included, as Go's does.
+    for (ping, quoted) in [
+        ("truncated-ping.php", "\"0123456789\""),
+        ("cut-ping.php", "\"\""),
+    ] {
+        let list = write_server_list("probe-cut", &[(1, "Cut", backend.url(), ping)]);
+        let out = run(&[
+            "--local-json",
+            list.to_str().unwrap(),
+            "--server",
+            "1",
+            "--no-icmp",
+            "--json",
+            "--debug",
+        ]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{ping}: {stderr}");
+        let cause = failure(&out)
+            .strip_prefix(
+                "Selected server Cut (127.0.0.1) is not responding: reading the ping response: ",
+            )
+            .unwrap_or_else(|| panic!("{ping}: {stderr}"))
+            .to_string();
+        assert!(!cause.is_empty(), "{ping}: the cause is named: {stderr}");
+        assert!(
+            stderr.contains(&format!("\nFailed when parsing get IP result: {quoted}\n")),
+            "{ping}: {stderr}"
         );
     }
 }
