@@ -137,9 +137,10 @@ deliberately different.
 - **CSV formulas are defused.** A field starting with `=`, `+`, `-` or `@` gets
   a leading single quote, because spreadsheets evaluate what is left after
   unquoting.
-- **Response sizes are capped.** 8 MiB for a server list or a getIP answer,
-  64 KiB for a telemetry reply and 8 KiB for the check that a backend is up.
-  The cap bounds memory, not time, and `--timeout 0` leaves no time bound.
+- **Response sizes are capped.** Go reads a server list, a getIP answer and a
+  telemetry reply whole. This client stops at 8 MiB for the first two and at
+  64 KiB for the third. The cap bounds memory, not time, and `--timeout 0`
+  leaves no time bound.
 - **A redirect may not leave https for http.** It is an error here. Go follows
   it and only leaves out the Referer.
 - **A request body is not sent on to another origin.** A 307 or 308 that would

@@ -1180,7 +1180,7 @@ fn a_server_that_is_down_fails_the_run_in_every_mode() {
         assert_eq!(out.status.code(), Some(1), "{mode:?}: {stderr}");
         assert_eq!(stdout_of(&out), "", "{mode:?}: no report");
         let msg = failure(&out);
-        // The cause is worded by reqwest and the OS; only its presence counts.
+        // The cause is worded by hyper and the OS. Only its presence counts.
         let cause = msg
             .strip_prefix(DOWN)
             .unwrap_or_else(|| panic!("{mode:?}: {msg}"));
