@@ -3,6 +3,9 @@
 //! The binary is a thin wrapper around this library, so the parsing and
 //! measurement logic can be exercised by tests and fuzz targets without
 //! spawning a process.
+//!
+//! The library is not meant for other crates. Its API can change in any
+//! release, a minor or patch one included.
 
 pub mod cli;
 pub mod defs;

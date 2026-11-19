@@ -27,6 +27,10 @@ other than decimal seconds from 1970 to the end of 9999, an empty one included,
 fails the build. It fixes only the date and does not make the binary
 bit-for-bit reproducible, see [RELEASING.md](RELEASING.md#how-to-release).
 
+The crate is published for the command. Its library exists so the binary, the
+tests and the fuzz targets can share code, and its API can change in any
+release, a minor or patch one included.
+
 ## Usage
 
 ```sh
