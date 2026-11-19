@@ -31,5 +31,93 @@
     "getIpURL": "getIP.php",
     "sponsorName": "",
     "sponsorURL": ""
+  },
+  {
+    "id": 4,
+    "name": "Truncated 404",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "truncated-404.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 5,
+    "name": "Stalled 404",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "stalled-404.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 6,
+    "name": "Truncated probe",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "truncated-ping.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 7,
+    "name": "Stalled probe",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "stalled-ping.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 8,
+    "name": "No content",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "no-content.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 9,
+    "name": "Chunked 404",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "chunked-404.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 10,
+    "name": "Chunked probe",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "chunked-ping.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
+  },
+  {
+    "id": 11,
+    "name": "Long probe",
+    "server": "http://127.0.0.1:@GARBLED@/",
+    "dlURL": "garbage.php",
+    "ulURL": "empty.php",
+    "pingURL": "long-ping.php",
+    "getIpURL": "getIP.php",
+    "sponsorName": "",
+    "sponsorURL": ""
   }
 ]

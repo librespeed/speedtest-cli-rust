@@ -157,9 +157,16 @@ async fn drain_body(body: Incoming) -> anyhow::Result<u64> {
 /// For deciding what a body *is* rather than reading it: emptiness, or the
 /// opening of an error page worth showing. Reading stops once `limit` bytes
 /// are kept, so a body that never ends cannot keep the caller waiting.
-async fn body_prefix(body: Incoming, limit: usize) -> anyhow::Result<Bytes> {
-    let mut body = body;
-    let mut out = BytesMut::new();
+///
+/// The bytes are kept in `out`, so a read that fails, or is dropped when the
+/// time runs out, leaves what it got there, as Go's `io.ReadAll` returns it.
+/// Frames other than data, such as trailers, are skipped.
+async fn body_prefix<B>(body: B, limit: usize, out: &mut BytesMut) -> anyhow::Result<()>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let mut body = std::pin::pin!(body);
 
     while out.len() < limit {
         let Some(frame) = body.frame().await else {
@@ -171,7 +178,23 @@ async fn body_prefix(body: Incoming, limit: usize) -> anyhow::Result<Bytes> {
         }
     }
 
-    Ok(out.freeze())
+    Ok(())
+}
+
+/// What a probe got back: the status and connection of the response, and as
+/// much of its body as was read.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Prefix {
+    pub status: StatusCode,
+    /// The start of the body, up to the limit asked for. A body that reached
+    /// the limit may go on, and the rest is never read.
+    pub body: Bytes,
+    /// Why the body broke off before its end or the limit, if it did. `None`
+    /// does not say the body ended, only that nothing failed before it ended
+    /// or reached the limit.
+    pub body_error: Option<anyhow::Error>,
+    pub facts: ConnectionFacts,
 }
 
 /// The hyper client configuration `HttpClient` is built from.
@@ -257,11 +280,30 @@ impl HttpClient {
         &self,
         fut: impl std::future::Future<Output = anyhow::Result<T>>,
     ) -> anyhow::Result<T> {
-        if self.timeout.is_zero() {
-            return fut.await;
-        }
+        self.until(self.deadline(), fut).await
+    }
 
-        tokio::time::timeout(self.timeout, fut)
+    /// When the configured timeout runs out if it starts now, or `None` when
+    /// it is zero or too far off to represent, as `tokio::time::timeout`
+    /// treats it.
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        if self.timeout.is_zero() {
+            return None;
+        }
+        tokio::time::Instant::now().checked_add(self.timeout)
+    }
+
+    /// Runs `fut` until `deadline`, failing it with the timeout's error after.
+    async fn until<T>(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+        fut: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<T> {
+        let Some(deadline) = deadline else {
+            return fut.await;
+        };
+
+        tokio::time::timeout_at(deadline, fut)
             .await
             .map_err(|_| anyhow::anyhow!("request timed out after {:?}", self.timeout))?
     }
@@ -419,22 +461,34 @@ impl HttpClient {
     /// timeout set. The rest is dropped unread, which closes an HTTP/1.1
     /// connection instead of returning it to the pool. The backend probe can
     /// afford that, because a body at all already marks the backend down.
-    pub async fn get_prefix(
-        &self,
-        url: &Url,
-        limit: usize,
-    ) -> anyhow::Result<(StatusCode, Bytes, ConnectionFacts)> {
-        let fut = async {
-            let resp = self
-                .request(Method::GET, url, &[], RequestBody::Empty)
-                .await?;
-            let status = resp.status();
-            let facts = ConnectionFacts::of(&resp);
-            let body = body_prefix(resp.into_body(), limit).await?;
-            Ok::<_, anyhow::Error>((status, body, facts))
-        };
+    ///
+    /// The timeout covers the response and its body together, as Go's client
+    /// timeout does. Once the response is in, a body that fails or runs out of
+    /// time is reported in the result, so its status is not lost. A body that
+    /// stalls short of the limit holds the call until the timeout, and for
+    /// good with no timeout set, as it holds Go's client.
+    pub async fn get_prefix(&self, url: &Url, limit: usize) -> anyhow::Result<Prefix> {
+        let deadline = self.deadline();
+        let resp = self
+            .until(
+                deadline,
+                self.request(Method::GET, url, &[], RequestBody::Empty),
+            )
+            .await?;
+        let status = resp.status();
+        let facts = ConnectionFacts::of(&resp);
+        let mut body = BytesMut::new();
+        let body_error = self
+            .until(deadline, body_prefix(resp.into_body(), limit, &mut body))
+            .await
+            .err();
 
-        self.with_timeout(fut).await
+        Ok(Prefix {
+            status,
+            body: body.freeze(),
+            body_error,
+            facts,
+        })
     }
 
     /// Posts a body and reads the whole response, used for telemetry.
@@ -1696,17 +1750,159 @@ ZD/4gnUj9TooNmtCjXdP4GAKxDoCb0FzQoHhDoi8BXY4DFLQYpbnX4Nu
         });
 
         let client = client(Duration::ZERO);
-        let (status, prefix, _) = tokio::time::timeout(TIMEOUT, client.get_prefix(&url, 10_000))
+        let prefix = tokio::time::timeout(TIMEOUT, client.get_prefix(&url, 10_000))
             .await
             .expect("reading a prefix of an endless body did not return")
             .unwrap();
 
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(prefix.len(), 10_000);
+        assert_eq!(prefix.status, StatusCode::OK);
+        assert_eq!(prefix.body.len(), 10_000);
+        assert!(prefix.body_error.is_none());
         tokio::time::timeout(TIMEOUT, closed)
             .await
             .expect("the connection was not closed")
             .unwrap();
+    }
+
+    /// A body that breaks off, by a hang-up or by the timeout, still leaves
+    /// the status and the bytes read before it, with the reason beside them.
+    #[tokio::test]
+    async fn a_prefix_that_breaks_off_keeps_its_status_and_bytes() {
+        for hang_up in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_request(&mut stream).await;
+                let head = "HTTP/1.1 404 Not Found\r\nContent-Length: 64\r\n\r\n0123456789";
+                let _ = stream.write_all(head.as_bytes()).await;
+                if !hang_up {
+                    tokio::time::sleep(TIMEOUT).await;
+                }
+            });
+
+            // Long enough for the response head on a busy runner, which the
+            // timeout covers too.
+            let client = client(Duration::from_secs(1));
+            let prefix = tokio::time::timeout(TIMEOUT, client.get_prefix(&url, 512))
+                .await
+                .expect("a body that broke off did not return")
+                .expect("the response itself arrived");
+
+            assert_eq!(prefix.status, StatusCode::NOT_FOUND, "hang up: {hang_up}");
+            assert_eq!(&prefix.body[..], b"0123456789", "hang up: {hang_up}");
+            let error = prefix.body_error.expect("the break is reported");
+            if hang_up {
+                // hyper reports a body cut short of its Content-Length as an
+                // unexpected end of the connection.
+                assert!(
+                    error.chain().any(|e| e
+                        .downcast_ref::<io::Error>()
+                        .is_some_and(|e| e.kind() == io::ErrorKind::UnexpectedEof)),
+                    "not the hang-up: {error:#}"
+                );
+            } else {
+                assert_eq!(error.to_string(), "request timed out after 1s");
+            }
+        }
+    }
+
+    /// What `body_prefix` keeps of a body arriving in the given frames, and
+    /// whether it reported an error.
+    async fn prefix_of(frames: Vec<Result<hyper::body::Frame<Bytes>, io::Error>>) -> (usize, bool) {
+        let body = http_body_util::StreamBody::new(futures_util::stream::iter(frames));
+        let mut out = BytesMut::new();
+        let failed = body_prefix(body, 512, &mut out).await.is_err();
+        (out.len(), failed)
+    }
+
+    fn data(len: usize) -> Result<hyper::body::Frame<Bytes>, io::Error> {
+        Ok(hyper::body::Frame::data(Bytes::from(vec![b'x'; len])))
+    }
+
+    fn trailers() -> Result<hyper::body::Frame<Bytes>, io::Error> {
+        Ok(hyper::body::Frame::trailers(http::HeaderMap::new()))
+    }
+
+    fn broken() -> Result<hyper::body::Frame<Bytes>, io::Error> {
+        Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+    }
+
+    /// The limit holds however the body is cut into frames, and a body that
+    /// reaches it is not read further, so what comes after cannot fail it.
+    #[tokio::test]
+    async fn a_prefix_keeps_the_limit_whatever_the_frames() {
+        for (frames, kept, failed, case) in [
+            (vec![data(512)], 512, false, "exactly the limit"),
+            (vec![data(513)], 512, false, "one byte over"),
+            (
+                vec![data(300), data(300)],
+                512,
+                false,
+                "over it across two frames",
+            ),
+            (
+                vec![data(100), data(0), data(100)],
+                200,
+                false,
+                "an empty frame between",
+            ),
+            (
+                vec![data(512), broken()],
+                512,
+                false,
+                "a break after the limit",
+            ),
+            (vec![trailers()], 0, false, "trailers alone"),
+            (vec![data(10), trailers()], 10, false, "data, then trailers"),
+            (
+                vec![data(10), broken()],
+                10,
+                true,
+                "a break after ten bytes",
+            ),
+            (vec![], 0, false, "no frame at all"),
+        ] {
+            assert_eq!(prefix_of(frames).await, (kept, failed), "{case}");
+        }
+    }
+
+    /// The response and its body share one deadline, as under Go's client
+    /// timeout: a head that took half the timeout leaves the body the other
+    /// half, not a timeout of its own.
+    #[tokio::test]
+    async fn a_body_gets_only_what_the_head_left_of_the_timeout() {
+        // Each half leaves a busy runner a second and a half of slack.
+        const LIMIT: Duration = Duration::from_secs(3);
+        const HEAD_AFTER: Duration = Duration::from_millis(1500);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            tokio::time::sleep(HEAD_AFTER).await;
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n0123456789";
+            let _ = stream.write_all(head.as_bytes()).await;
+            tokio::time::sleep(TIMEOUT).await;
+        });
+
+        let client = client(LIMIT);
+        let started = std::time::Instant::now();
+        let prefix = tokio::time::timeout(TIMEOUT, client.get_prefix(&url, 512))
+            .await
+            .expect("a stalled body did not return")
+            .expect("the head arrived within the timeout");
+        let took = started.elapsed();
+
+        let error = prefix.body_error.expect("the stall is reported");
+        assert_eq!(error.to_string(), "request timed out after 3s");
+        // Timers never fire early, so a timeout of its own for the body would
+        // end it no sooner than this.
+        assert!(
+            took < HEAD_AFTER + LIMIT,
+            "the body got a timeout of its own: {took:?}"
+        );
     }
 
     /// Over TLS the meter counts what the TLS session accepted, which is what

@@ -143,37 +143,101 @@ fn escape_like_go(s: &str) -> String {
 
 /// The current time, formatted the way Go's `time.Time` marshals to JSON.
 pub fn timestamp_now() -> String {
-    format_timestamp(chrono::Local::now().fixed_offset())
+    render(local_now())
 }
 
-/// Formats a timestamp as Go's RFC 3339 "nano" layout does: the fractional
-/// second keeps only as many digits as it needs, disappearing entirely when it
-/// is zero, and a zero offset is written `Z`.
+/// Formats `t` as `format_timestamp` does, for any year the clock can show,
+/// so a report always has its timestamp.
+fn render(t: time::OffsetDateTime) -> String {
+    go_rfc3339_nano(
+        time::PrimitiveDateTime::new(t.date(), t.time()),
+        t.offset().whole_seconds(),
+    )
+}
+
+/// The current time on the local clock, or in UTC when the system cannot
+/// say what the local offset is or the local date would pass 9999.
 ///
-/// Not chrono's `to_rfc3339_opts`, which rounds the fraction to 0, 3, 6 or 9
-/// digits and spells a zero offset `+00:00`.
-pub fn format_timestamp(t: chrono::DateTime<chrono::FixedOffset>) -> String {
-    use chrono::Timelike as _;
+/// The C library reads `TZ` for the offset, which a thread setting it at the
+/// same moment would make undefined. Nothing in this program sets it.
+pub(crate) fn local_now() -> time::OffsetDateTime {
+    let now = time::OffsetDateTime::now_utc();
+    if !has_local_zone() {
+        return now;
+    }
+    time::UtcOffset::local_offset_at(now)
+        .ok()
+        .and_then(|offset| now.checked_to_offset(offset))
+        .unwrap_or(now)
+}
 
-    let date = t.format("%Y-%m-%dT%H:%M:%S");
+/// Whether to ask the C library for the local offset: for a `TZ` that is not
+/// empty, or else when `/etc/localtime` exists, the two places Go looks.
+/// OpenWrt's C library falls back to `/etc/TZ`, which Go does not read, so a
+/// router with neither stays on UTC, as with Go. A `TZ` holding a POSIX rule
+/// such as `CET-1CEST,M3.5.0,M10.5.0/3` is followed, as in 1.2.1, where Go
+/// writes UTC.
+#[cfg(unix)]
+fn has_local_zone() -> bool {
+    local_zone_in(std::env::var_os("TZ").as_deref(), || {
+        std::path::Path::new("/etc/localtime").exists()
+    })
+}
 
-    // A leap second is carried in the nanosecond field as a value past one
-    // second; Go has no such representation, so it is folded back in.
-    let nanos = t.nanosecond() % 1_000_000_000;
+/// `has_local_zone` for a given `TZ` and a way to see whether
+/// `/etc/localtime` exists. A `TZ` the C library cannot read counts too: it
+/// answers UTC for it, as Go does.
+#[cfg(unix)]
+fn local_zone_in(tz: Option<&std::ffi::OsStr>, localtime_exists: impl FnOnce() -> bool) -> bool {
+    match tz {
+        Some(tz) => !tz.is_empty(),
+        None => localtime_exists(),
+    }
+}
+
+#[cfg(not(unix))]
+fn has_local_zone() -> bool {
+    true
+}
+
+/// Formats the instant `unix_seconds` and `nanos` after the Unix epoch, seen
+/// `offset_seconds` east of UTC, the way Go marshals
+/// `time.Unix(sec, nsec).In(time.FixedZone("", offset))` to JSON.
+///
+/// `None` where Go's marshal fails: a year outside 0 to 9999 on that clock,
+/// or an offset of a day or more.
+pub fn format_timestamp(unix_seconds: i64, nanos: u32, offset_seconds: i32) -> Option<String> {
+    if offset_seconds.unsigned_abs() >= 86_400 {
+        return None;
+    }
+    let since_epoch = time::Duration::seconds(unix_seconds.checked_add(i64::from(offset_seconds))?)
+        .checked_add(time::Duration::nanoseconds(i64::from(nanos)))?;
+    let epoch = time::OffsetDateTime::UNIX_EPOCH;
+    let wall = time::PrimitiveDateTime::new(epoch.date(), epoch.time()).checked_add(since_epoch)?;
+    (0..=9999)
+        .contains(&wall.year())
+        .then(|| go_rfc3339_nano(wall, offset_seconds))
+}
+
+/// Formats the time `wall` on a clock `offset_seconds` east of UTC as Go's
+/// RFC 3339 "nano" layout does: the fractional second keeps only as many
+/// digits as it needs, disappearing entirely when it is zero, and a zero
+/// offset is written `Z`.
+fn go_rfc3339_nano(wall: time::PrimitiveDateTime, offset_seconds: i32) -> String {
+    let nanos = wall.nanosecond();
     let fraction = if nanos == 0 {
         String::new()
     } else {
         format!(".{}", format!("{nanos:09}").trim_end_matches('0'))
     };
 
-    let offset = t.offset().local_minus_utc();
-    let zone = if offset == 0 {
+    let zone = if offset_seconds == 0 {
         "Z".to_string()
     } else {
         // Go truncates the offset to whole minutes and takes the sign from
         // what is left, so an offset less than a minute behind UTC is written
         // as ahead of it.
-        let minutes = offset / 60;
+        let minutes = offset_seconds / 60;
         let (sign, minutes) = if minutes < 0 {
             ('-', -minutes)
         } else {
@@ -182,7 +246,15 @@ pub fn format_timestamp(t: chrono::DateTime<chrono::FixedOffset>) -> String {
         format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60)
     };
 
-    format!("{date}{fraction}{zone}")
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}{zone}",
+        wall.year(),
+        u8::from(wall.month()),
+        wall.day(),
+        wall.hour(),
+        wall.minute(),
+        wall.second()
+    )
 }
 
 /// The speed test server's information in a JSON report.
@@ -349,15 +421,13 @@ pub fn csv_rows(reports: &[CSVReport], delimiter: u8) -> anyhow::Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone as _, Timelike as _};
 
-    fn at(nanos: u32, offset_seconds: i32) -> chrono::DateTime<chrono::FixedOffset> {
-        chrono::FixedOffset::east_opt(offset_seconds)
-            .unwrap()
-            .with_ymd_and_hms(2026, 8, 6, 15, 41, 36)
-            .unwrap()
-            .with_nanosecond(nanos)
-            .unwrap()
+    /// 2026-08-06 15:41:36 and `nanos` on a clock `offset_seconds` east of
+    /// UTC, formatted.
+    fn at(nanos: u32, offset_seconds: i32) -> String {
+        // 2026-08-06T15:41:36Z
+        const WALL: i64 = 1_786_030_896;
+        format_timestamp(WALL - i64::from(offset_seconds), nanos, offset_seconds).unwrap()
     }
 
     #[test]
@@ -440,31 +510,100 @@ mod tests {
 
     #[test]
     fn timestamps_trim_the_fraction_the_way_go_does() {
-        assert_eq!(
-            format_timestamp(at(411_388_000, 7200)),
-            "2026-08-06T15:41:36.411388+02:00"
-        );
-        assert_eq!(
-            format_timestamp(at(380_000_000, 7200)),
-            "2026-08-06T15:41:36.38+02:00"
-        );
-        assert_eq!(format_timestamp(at(0, 7200)), "2026-08-06T15:41:36+02:00");
-        assert_eq!(
-            format_timestamp(at(1, 7200)),
-            "2026-08-06T15:41:36.000000001+02:00"
-        );
+        assert_eq!(at(411_388_000, 7200), "2026-08-06T15:41:36.411388+02:00");
+        assert_eq!(at(380_000_000, 7200), "2026-08-06T15:41:36.38+02:00");
+        assert_eq!(at(0, 7200), "2026-08-06T15:41:36+02:00");
+        assert_eq!(at(1, 7200), "2026-08-06T15:41:36.000000001+02:00");
     }
 
     #[test]
     fn a_zero_offset_is_written_z() {
+        assert_eq!(at(20_091_000, 0), "2026-08-06T15:41:36.020091Z");
+        assert_eq!(at(0, -19_800), "2026-08-06T15:41:36-05:30");
+    }
+
+    /// The clock's path writes what `format_timestamp`, which the golden test
+    /// checks against Go, writes for the same instant.
+    #[test]
+    fn the_current_time_is_written_as_format_timestamp_writes_it() {
+        for secs in [
+            -62_135_596_800,
+            -1,
+            0,
+            1,
+            951_782_400,
+            1_786_023_696,
+            4_102_444_800,
+            253_402_214_400,
+        ] {
+            for nanos in [0, 1, 120_000_000, 999_999_999] {
+                for offset in [0, 3600, -3600, 19_800, -19_800, 30, -30, 86_399, -86_399] {
+                    let Some(want) = format_timestamp(secs, nanos, offset) else {
+                        continue;
+                    };
+                    let t = time::OffsetDateTime::from_unix_timestamp_nanos(
+                        i128::from(secs) * 1_000_000_000 + i128::from(nanos),
+                    )
+                    .unwrap()
+                    .to_offset(time::UtcOffset::from_whole_seconds(offset).unwrap());
+                    assert_eq!(render(t), want, "{secs}.{nanos} at {offset}");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_local_zone_is_asked_for_where_go_looks_for_one() {
+        use std::ffi::OsStr;
+        // Set to a name, or to one the C library cannot read and answers UTC
+        // for: ask it either way.
+        assert!(local_zone_in(Some(OsStr::new("Europe/Prague")), || false));
+        assert!(local_zone_in(Some(OsStr::new("garbage")), || false));
+        // Set but empty is UTC, as in Go, whatever /etc/localtime says.
+        assert!(!local_zone_in(Some(OsStr::new("")), || true));
+        // Unset: /etc/localtime decides.
+        assert!(local_zone_in(None, || true));
+        assert!(!local_zone_in(None, || false));
+    }
+
+    #[test]
+    fn a_year_go_cannot_marshal_has_no_timestamp() {
+        // 0000-01-01T00:00:00Z and 9999-12-31T23:59:59Z, then a second
+        // outside each.
         assert_eq!(
-            format_timestamp(at(20_091_000, 0)),
-            "2026-08-06T15:41:36.020091Z"
+            format_timestamp(-62_167_219_200, 0, 0).as_deref(),
+            Some("0000-01-01T00:00:00Z")
         );
         assert_eq!(
-            format_timestamp(at(0, -19_800)),
-            "2026-08-06T15:41:36-05:30"
+            format_timestamp(253_402_300_799, 0, 0).as_deref(),
+            Some("9999-12-31T23:59:59Z")
         );
+        assert_eq!(format_timestamp(-62_167_219_201, 0, 0), None);
+        assert_eq!(format_timestamp(253_402_300_800, 0, 0), None);
+        // The year is the clock's: an hour ahead of UTC is already 10000.
+        assert_eq!(format_timestamp(253_402_297_200, 0, 3600), None);
+        // Go refuses these too: "year outside of range [0,9999]".
+        assert_eq!(format_timestamp(i64::MAX, 0, 0), None);
+        assert_eq!(format_timestamp(i64::MIN, 0, 0), None);
+        assert_eq!(format_timestamp(i64::MAX, 999_999_999, 86_399), None);
+    }
+
+    #[test]
+    fn an_offset_go_cannot_marshal_has_no_timestamp() {
+        // Go 1.26 writes 23:59 either side and refuses a whole day:
+        // "timezone hour outside of range [0,23]".
+        assert_eq!(
+            format_timestamp(1_786_023_696, 0, 86_399).as_deref(),
+            Some("2026-08-07T13:41:35+23:59")
+        );
+        assert_eq!(
+            format_timestamp(1_786_023_696, 0, -86_399).as_deref(),
+            Some("2026-08-05T13:41:37-23:59")
+        );
+        assert_eq!(format_timestamp(1_786_023_696, 0, 86_400), None);
+        assert_eq!(format_timestamp(1_786_023_696, 0, -86_400), None);
+        assert_eq!(format_timestamp(1_786_023_696, 0, i32::MIN), None);
     }
 
     #[test]

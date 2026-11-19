@@ -51,6 +51,15 @@ pub enum Variant {
     /// - `POST /telemetry-500-id.php`: 500 with a body shaped like a share
     ///   reply.
     /// - `POST /telemetry-500-page.php`: 500 with an HTML error page.
+    /// - `GET /truncated-404.php` and `GET /truncated-ping.php`: 404 and 200
+    ///   with ten bytes of a promised 64, then a hang-up.
+    /// - `GET /stalled-404.php` and `GET /stalled-ping.php`: the same ten
+    ///   bytes, then [`STALL`] of silence before the hang-up.
+    /// - `GET /no-content.php`: 204.
+    /// - `GET /chunked-404.php` and `GET /chunked-ping.php`: 404 and 200 with
+    ///   a chunked body that hangs up after its first chunk.
+    /// - `GET /long-ping.php`: 200 with 4096 bytes, more than either client
+    ///   reads of a probe.
     Garbled,
 }
 
@@ -211,8 +220,52 @@ fn respond(writer: &mut TcpStream, variant: Variant, request: &Request) -> io::R
             "text/html",
             b"<html><body>Internal Server Error</body></html>\n",
         ),
+        "/truncated-404.php" if get && garbled => broken_off(writer, "404 Not Found", false),
+        "/stalled-404.php" if get && garbled => broken_off(writer, "404 Not Found", true),
+        "/truncated-ping.php" if get && garbled => broken_off(writer, "200 OK", false),
+        "/stalled-ping.php" if get && garbled => broken_off(writer, "200 OK", true),
+        "/no-content.php" if get && garbled => send(writer, "204 No Content", "text/plain", b""),
+        "/chunked-404.php" if get && garbled => chunked_broken_off(writer, "404 Not Found"),
+        "/chunked-ping.php" if get && garbled => chunked_broken_off(writer, "200 OK"),
+        "/long-ping.php" if get && garbled => send(
+            writer,
+            "200 OK",
+            "text/plain",
+            &b"0123456789abcdef".repeat(256),
+        ),
         _ => send(writer, "404 Not Found", "text/plain", b""),
     }
+}
+
+/// How long a stalled reply stays silent: longer than the one-second timeout
+/// of the cases, with room for a slow runner.
+const STALL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ten bytes of a promised 64, then a hang-up, after [`STALL`] of silence
+/// with `stall`.
+fn broken_off(writer: &mut TcpStream, status: &str, stall: bool) -> io::Result<()> {
+    let head =
+        format!("HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: 64\r\n\r\n");
+    writer.write_all(head.as_bytes())?;
+    writer.write_all(b"0123456789")?;
+    writer.flush()?;
+    if stall {
+        std::thread::sleep(STALL);
+    }
+    // An error ends the connection's loop, which is the hang-up.
+    Err(io::ErrorKind::ConnectionAborted.into())
+}
+
+/// A chunked body that hangs up after its first chunk of ten bytes, before
+/// the last chunk that would end it.
+fn chunked_broken_off(writer: &mut TcpStream, status: &str) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n"
+    );
+    writer.write_all(head.as_bytes())?;
+    writer.write_all(b"a\r\n0123456789\r\n")?;
+    writer.flush()?;
+    Err(io::ErrorKind::ConnectionAborted.into())
 }
 
 fn send(writer: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> io::Result<()> {

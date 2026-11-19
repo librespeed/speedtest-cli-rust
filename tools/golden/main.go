@@ -325,6 +325,11 @@ func instants() []instant {
 	} {
 		out = append(out, instant{base, ns, 7200}, instant{base, ns, 0})
 	}
+	// Nanoseconds of a whole second or more, which time.Unix carries into the
+	// seconds. The largest is the most a u32 holds.
+	for _, ns := range []int64{1000000000, 1999999999, 4294967295} {
+		out = append(out, instant{base, ns, 7200}, instant{base, ns, 0})
+	}
 	// Offsets: zero, whole hours, half and quarter hours, the extremes in
 	// use, and ones a minute cannot express, which Go truncates.
 	for _, off := range []int{

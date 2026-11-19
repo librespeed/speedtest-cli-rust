@@ -69,7 +69,6 @@ pub async fn do_speed_test(
     let delimiter = cli.csv_delimiter_byte()?;
     let mut reps_json: Vec<JSONReport> = Vec::new();
     let mut reps_csv: Vec<CSVReport> = Vec::new();
-    let mut measured = false;
     // Each server that did not answer its probe, and why.
     let mut down: Vec<(String, String)> = Vec::new();
 
@@ -105,26 +104,20 @@ pub async fn do_speed_test(
         }
 
         let status = current_server.is_up(out, ctx.client, &tlog).await;
-        if !status.up {
-            write_ui!(
-                out,
-                "Selected server {} ({}) is not responding at the moment, try again later\n",
+        if let Some(why) = status.down_reason {
+            let label = format!(
+                "{} ({})",
                 output::sanitize(&current_server.name),
                 output::sanitize(&hostname)
+            );
+            write_ui!(
+                out,
+                "Selected server {label} is not responding at the moment, try again later\n"
             );
             if servers.len() > 1 && !out.quiet {
                 output::write_ui_blank();
             }
-            down.push((
-                format!(
-                    "{} ({})",
-                    output::sanitize(&current_server.name),
-                    output::sanitize(&hostname)
-                ),
-                status
-                    .down_reason
-                    .unwrap_or_else(|| "its probe failed".to_string()),
-            ));
+            down.push((label, why));
             continue;
         }
 
@@ -358,8 +351,6 @@ pub async fn do_speed_test(
             });
         }
 
-        measured = true;
-
         // Add a blank line after each test when testing multiple servers.
         if servers.len() > 1 && !out.quiet {
             output::write_ui_blank();
@@ -367,8 +358,10 @@ pub async fn do_speed_test(
     }
 
     // No server answered: fail instead of printing an empty report, which with
-    // exit status 0 would pass for a result.
-    if !measured && !down.is_empty() {
+    // exit status 0 would pass for a result. A server that got this far was
+    // measured or is in `down`, every other path returns, so the report has
+    // something in it whenever this lets the run through.
+    if down.len() == servers.len() {
         return Err(none_responding(&down));
     }
 
@@ -380,12 +373,12 @@ pub async fn do_speed_test(
     } else if cli.json_stream {
         // The reports are the same array --json prints, wrapped as the final
         // event so a consumer needs one parser for the whole stream.
-        match report::to_go_json(&json_reports(&reps_json)) {
+        match report::to_go_json(&reps_json) {
             Ok(s) => out.stream_event(&format!(r#"{{"event":"result","reports":{s}}}"#)),
             Err(e) => write_error!("Error generating JSON report: {e}\n"),
         }
     } else if cli.json {
-        match report::to_go_json(&json_reports(&reps_json)) {
+        match report::to_go_json(&reps_json) {
             // serde_json does not terminate its output, and a document that
             // ends mid-line makes a shell prompt land on top of it and leaves
             // line-oriented tools with an unterminated last line.
@@ -417,14 +410,6 @@ fn none_responding(down: &[(String, String)]) -> anyhow::Error {
                 .join("; ")
         ),
     }
-}
-
-/// The reports as JSON sees them: `null` when nothing was measured.
-///
-/// Go declares a nil slice, which marshals to `null`. No run gets here with
-/// nothing measured any more: down servers and an empty list fail it first.
-fn json_reports(reports: &[JSONReport]) -> Option<&[JSONReport]> {
-    (!reports.is_empty()).then_some(reports)
 }
 
 /// Sends the result to the telemetry server and returns the share link.

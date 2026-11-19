@@ -64,7 +64,6 @@ http2 = ["hyper/http2", "hyper-util/http2", "hyper-rustls?/http2"]
 [dependencies]
 anyhow = "1"
 bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 clap = { version = "4", features = ["derive", "string", "wrap_help"] }
 csv = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -89,6 +88,11 @@ tokio-native-tls = { version = "0.3", optional = true }
 serde_json = { version = "1", features = ["raw_value"] }
 socket2 = { version = "0.6", features = ["all"] }
 surge-ping = "0.8"
+# The local time for report timestamps and the telemetry log, which
+# local-offset asks the C library for on Unix and the system for on Windows.
+# Before 0.3.37 it refused on Linux once a second thread ran, as one always
+# does here, and every timestamp fell back to UTC.
+time = { version = "0.3.37", default-features = false, features = ["std", "local-offset"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "fs", "signal"] }
 tower-service = "0.3"
 url = "2"
@@ -101,7 +105,7 @@ strip = true
 panic = "abort"
 
 [build-dependencies]
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # Unicode data to check the sanitizer's own table against. Already in the

@@ -36,10 +36,7 @@ impl TelemetryLog {
     }
 
     fn push(&self, prefix: &str, msg: &str) {
-        let now = chrono::Local::now();
-        // Close to Go's `time.Time.String()` layout. The zone abbreviation Go
-        // prints last is omitted: it would need a tz database to resolve.
-        let stamp = now.format("%Y-%m-%d %H:%M:%S%.f %z");
+        let stamp = log_stamp(crate::report::local_now());
         self.content
             .lock()
             .unwrap()
@@ -79,6 +76,41 @@ impl TelemetryLog {
     pub fn contents(&self) -> String {
         self.content.lock().unwrap().join("\n")
     }
+}
+
+/// When a log line was written: close to Go's `time.Time.String()` layout,
+/// without the zone abbreviation and the monotonic clock reading Go adds. The
+/// fraction keeps 3, 6 or 9 digits and the offset is rounded to the minute, as
+/// earlier releases wrote them.
+fn log_stamp(t: time::OffsetDateTime) -> String {
+    let nanos = t.nanosecond();
+    let fraction = if nanos == 0 {
+        String::new()
+    } else if nanos.is_multiple_of(1_000_000) {
+        format!(".{:03}", nanos / 1_000_000)
+    } else if nanos.is_multiple_of(1_000) {
+        format!(".{:06}", nanos / 1_000)
+    } else {
+        format!(".{nanos:09}")
+    };
+    let offset = t.offset().whole_seconds();
+    let (sign, offset) = if offset < 0 {
+        ('-', -offset)
+    } else {
+        ('+', offset)
+    };
+    let minutes = (offset + 30) / 60;
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}{fraction} {sign}{:02}{:02}",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        minutes / 60,
+        minutes % 60
+    )
 }
 
 /// The `extra` field of the telemetry payload.
@@ -134,5 +166,43 @@ impl TelemetryServer {
         let mut u = base;
         u.set_path(&joined);
         Ok(u)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The log stamp of 2026-08-06 15:41:36 and `nanos` on a clock
+    /// `offset_seconds` east of UTC.
+    fn at(nanos: u32, offset_seconds: i32) -> String {
+        let offset = time::UtcOffset::from_whole_seconds(offset_seconds).unwrap();
+        let t = time::Date::from_calendar_date(2026, time::Month::August, 6)
+            .unwrap()
+            .with_hms_nano(15, 41, 36, nanos)
+            .unwrap()
+            .assume_offset(offset);
+        log_stamp(t)
+    }
+
+    #[test]
+    fn log_stamps_keep_three_six_or_nine_digits_of_the_second() {
+        assert_eq!(at(0, 7200), "2026-08-06 15:41:36 +0200");
+        assert_eq!(at(120_000_000, 7200), "2026-08-06 15:41:36.120 +0200");
+        assert_eq!(at(120_500_000, 7200), "2026-08-06 15:41:36.120500 +0200");
+        assert_eq!(at(1, -19_800), "2026-08-06 15:41:36.000000001 -0530");
+        assert_eq!(at(999_999_999, 0), "2026-08-06 15:41:36.999999999 +0000");
+    }
+
+    #[test]
+    fn log_stamps_round_the_offset_to_the_minute() {
+        assert_eq!(at(0, 19_829), "2026-08-06 15:41:36 +0530");
+        assert_eq!(at(0, 19_830), "2026-08-06 15:41:36 +0531");
+        assert_eq!(at(0, -19_830), "2026-08-06 15:41:36 -0531");
+        assert_eq!(at(0, -29), "2026-08-06 15:41:36 -0000");
+        assert_eq!(at(0, -30), "2026-08-06 15:41:36 -0001");
+        assert_eq!(at(0, -31), "2026-08-06 15:41:36 -0001");
+        assert_eq!(at(0, 29), "2026-08-06 15:41:36 +0000");
+        assert_eq!(at(0, 30), "2026-08-06 15:41:36 +0001");
     }
 }

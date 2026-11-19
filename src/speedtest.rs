@@ -485,7 +485,7 @@ async fn ping_all(servers: &[Server], ctx: &TestContext<'_>) -> Vec<(usize, f64)
             };
 
             // Check the server is up before spending time on a ping.
-            if !server.is_up(out, ctx.client, &tlog).await.up {
+            if !server.is_up(out, ctx.client, &tlog).await.up() {
                 write_debug!(
                     out,
                     "Server {} ({}) doesn't seem to be up, skipping\n",

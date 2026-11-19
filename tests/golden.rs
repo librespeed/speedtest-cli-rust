@@ -6,7 +6,6 @@
 //! Feeding the same inputs to this client pins the two renderings together
 //! without a Go toolchain at hand, so this runs in every `cargo test`.
 
-use chrono::{DateTime, FixedOffset};
 use librespeed_cli::defs::IPInfoResponse;
 use librespeed_cli::report::{
     csv_rows, format_timestamp, to_go_json, CSVReport, Client, JSONReport, ProgressEvent,
@@ -151,25 +150,16 @@ fn timestamps_render_as_time_marshals_them() {
         let [secs, nanos, offset, want] = row[..] else {
             panic!("a row of seconds, nanoseconds, offset and text: {row:?}");
         };
-        let at = instant(
-            secs.parse().expect("unix seconds"),
-            nanos.parse().expect("nanoseconds"),
-            offset.parse().expect("an offset in seconds"),
-        );
+        let secs = secs.parse().expect("unix seconds");
+        let nanos = nanos.parse().expect("nanoseconds");
+        let offset = offset.parse().expect("an offset in seconds");
         bad.check(
             &format!("{secs}.{nanos} at {offset}"),
-            &format_timestamp(at),
+            &format_timestamp(secs, nanos, offset).expect("an instant and offset in range"),
             want,
         );
     }
     bad.verdict();
-}
-
-/// The instant Go's `time.Unix(sec, nsec).In(time.FixedZone("", offset))` is.
-fn instant(secs: i64, nanos: u32, offset: i32) -> DateTime<FixedOffset> {
-    DateTime::from_timestamp(secs, nanos)
-        .expect("an instant chrono can hold")
-        .with_timezone(&FixedOffset::east_opt(offset).expect("an offset chrono can hold"))
 }
 
 /// A timestamp in the data, built the same way on both sides.
@@ -219,7 +209,8 @@ impl From<ReportIn> for JSONReport {
         let [ip, hostname, city, region, country, location, organization, postal, timezone, readme] =
             r.client;
         JSONReport {
-            timestamp: format_timestamp(instant(r.at.sec, r.at.nsec, r.at.offset)),
+            timestamp: format_timestamp(r.at.sec, r.at.nsec, r.at.offset)
+                .expect("an instant and offset in range"),
             server: ReportServer {
                 name: r.name,
                 url: r.url,

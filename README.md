@@ -22,9 +22,14 @@ a Rust port of the Go [librespeed-cli](https://github.com/librespeed/speedtest-c
 | Linux binaries | [Releases](https://github.com/librespeed/speedtest-cli-rust/releases) for x86_64, aarch64, armv7 and arm (musl) |
 | From source | `cargo build --release`, the binary is `target/release/librespeed-cli` |
 
-Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. It
-fixes only the date and does not make the binary bit-for-bit reproducible, see
-[RELEASING.md](RELEASING.md#how-to-release).
+Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. A value
+other than decimal seconds from 1970 to the end of 9999, an empty one included,
+fails the build. It fixes only the date and does not make the binary
+bit-for-bit reproducible, see [RELEASING.md](RELEASING.md#how-to-release).
+
+The crate is published for the command. Its library exists so the binary, the
+tests and the fuzz targets can share code, and its API can change in any
+release, a minor or patch one included.
 
 ## Usage
 
@@ -136,9 +141,10 @@ deliberately different.
 - **CSV formulas are defused.** A field starting with `=`, `+`, `-` or `@` gets
   a leading single quote, because spreadsheets evaluate what is left after
   unquoting.
-- **Response sizes are capped.** 8 MiB for a server list or a getIP answer,
-  64 KiB for a telemetry reply and 8 KiB for the check that a backend is up.
-  The cap bounds memory, not time, and `--timeout 0` leaves no time bound.
+- **Response sizes are capped.** Go reads a server list, a getIP answer and a
+  telemetry reply whole. This client stops at 8 MiB for the first two and at
+  64 KiB for the third. The cap bounds memory, not time, and `--timeout 0`
+  leaves no time bound.
 - **A redirect may not leave https for http.** It is an error here. Go follows
   it and only leaves out the Referer.
 - **A request body is not sent on to another origin.** A 307 or 308 that would
@@ -177,6 +183,9 @@ deliberately different.
   connection or a JSON syntax error, reads differently.
 - **A server URL's scheme keeps its case.** Go lowercases `HTTP://` when it
   parses the list.
+- **A POSIX rule in `TZ` sets the clock.** With `TZ=CET-1CEST,M3.5.0,M10.5.0/3`
+  the report timestamps and the telemetry log follow the rule, as 1.2.1 did.
+  Go takes only a zone name or file from `TZ` and writes UTC for a rule.
 - **The process exits rather than returning from `main`.** On 32-bit PowerPC
   musl, dropping the tokio runtime never finished and every run hung after its
   output. `main` ends with `process::exit(0)` as a workaround. Output is flushed
