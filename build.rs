@@ -6,16 +6,20 @@ fn main() {
     // SOURCE_DATE_EPOCH keeps reproducible builds reproducible; OpenWrt and
     // most distro packaging set it. Computing the date here rather than
     // shelling out to `date` avoids depending on GNU vs BSD flag differences.
-    let date = match std::env::var("SOURCE_DATE_EPOCH")
+    let at = std::env::var("SOURCE_DATE_EPOCH")
         .ok()
         .and_then(|epoch| epoch.parse::<i64>().ok())
-        .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
-    {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        None => chrono::Utc::now()
-            .format("%Y-%m-%d %H:%M:%S UTC")
-            .to_string(),
-    };
+        .and_then(|epoch| time::OffsetDateTime::from_unix_timestamp(epoch).ok())
+        .unwrap_or_else(time::OffsetDateTime::now_utc);
+    let date = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    );
 
     // The build date alone cannot identify a build: distro packaging derives
     // SOURCE_DATE_EPOCH from the package, so two builds of different commits

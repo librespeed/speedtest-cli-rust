@@ -177,6 +177,9 @@ deliberately different.
   connection or a JSON syntax error, reads differently.
 - **A server URL's scheme keeps its case.** Go lowercases `HTTP://` when it
   parses the list.
+- **A POSIX rule in `TZ` sets the clock.** With `TZ=CET-1CEST,M3.5.0,M10.5.0/3`
+  the report timestamps and the telemetry log follow the rule, as 1.2.1 did.
+  Go takes only a zone name or file from `TZ` and writes UTC for a rule.
 - **The process exits rather than returning from `main`.** On 32-bit PowerPC
   musl, dropping the tokio runtime never finished and every run hung after its
   output. `main` ends with `process::exit(0)` as a workaround. Output is flushed

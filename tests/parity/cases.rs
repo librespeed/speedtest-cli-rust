@@ -68,10 +68,10 @@ impl Why {
 }
 
 /// The entries of the README's list that no case here exercises: they need a
-/// second origin, a certificate, another operating system or hardware a test
-/// does not have -- and the one entry that only heads a group of entries that
-/// are exercised. Naming them is what lets the check insist that every other
-/// entry of the list has a case behind it.
+/// second origin, a certificate, another operating system, hardware a test
+/// does not have or a timestamp the comparison hides -- and the one entry that
+/// only heads a group of entries that are exercised. Naming them is what lets
+/// the check insist that every other entry of the list has a case behind it.
 pub const UNEXERCISED: &[&str] = &[
     "**Response sizes are capped.**",
     "**A request body is not sent on to another origin.**",
@@ -83,6 +83,10 @@ pub const UNEXERCISED: &[&str] = &[
     "**`--interface` works on macOS**",
     "**TLS verification is stricter.**",
     "**The process exits rather than returning from `main`.**",
+    // Timestamps become `<TS>` before the outputs are compared, so no case
+    // here sees the clock. `the_report_timestamp_follows_tz` in
+    // tests/integration.rs runs a POSIX rule.
+    "**A POSIX rule in `TZ` sets the clock.**",
     "**Go's command line quirks are not copied.**",
 ];
 

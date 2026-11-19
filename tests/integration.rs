@@ -452,6 +452,53 @@ fn telemetry_produces_a_share_link() {
     assert_eq!(backend.telemetry_hits.load(Ordering::Relaxed), 1);
 }
 
+/// The report's timestamp is on the clock `TZ` describes, and in UTC when it
+/// is empty or describes nothing the C library can read, as in the Go
+/// client. A POSIX rule is followed as in 1.2.1, where Go writes UTC. Each
+/// case is a process of its own, so no two share a `TZ`.
+#[cfg(unix)]
+#[test]
+fn the_report_timestamp_follows_tz() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("tz");
+    let mut cases = vec![
+        ("", "Z"),
+        ("UTC", "Z"),
+        ("garbage", "Z"),
+        ("XXX-5:45", "+05:45"),
+        ("XXX3:30", "-03:30"),
+    ];
+    // A zone name needs the system's time zone database.
+    if std::path::Path::new("/usr/share/zoneinfo/Asia/Kathmandu").exists() {
+        cases.push(("Asia/Kathmandu", "+05:45"));
+    }
+    for (tz, suffix) in cases {
+        let out = Command::new(BIN)
+            .args([
+                "--local-json",
+                list.to_str().unwrap(),
+                "--server",
+                "1",
+                "--no-icmp",
+                "--no-download",
+                "--no-upload",
+                "--json",
+            ])
+            .env("TZ", tz)
+            .output()
+            .expect("run librespeed-cli");
+        assert!(
+            out.status.success(),
+            "TZ={tz}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let reports: serde_json::Value =
+            serde_json::from_str(&stdout_of(&out)).expect("valid JSON");
+        let stamp = reports[0]["timestamp"].as_str().expect("a timestamp");
+        assert!(stamp.ends_with(suffix), "TZ={tz}: {stamp}");
+    }
+}
+
 #[test]
 fn no_download_and_no_upload_skip_their_tests() {
     let backend = MockBackend::start();
