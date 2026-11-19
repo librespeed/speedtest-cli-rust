@@ -636,12 +636,11 @@ fn go_status_text(status: StatusCode) -> Option<&'static str> {
 }
 
 /// Whether a backend answered its probe, and what that connection negotiated.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ServerStatus {
-    pub up: bool,
-    /// Why the backend is down, when it is: the refused connection, the
-    /// unreachable network, the wrong status, a body where none belongs or a
-    /// body that broke off.
+    /// Why the backend is down, `None` when it is up: the refused connection,
+    /// the unreachable network, the wrong status, a body where none belongs or
+    /// a body that broke off.
     pub down_reason: Option<String>,
     /// What the probe's connection negotiated. Kept whatever the status, but
     /// not for an answer that carried a body or broke off.
@@ -649,9 +648,13 @@ pub struct ServerStatus {
 }
 
 impl ServerStatus {
+    /// Whether the backend answered its probe as one that is up.
+    pub fn up(&self) -> bool {
+        self.down_reason.is_none()
+    }
+
     fn down(reason: String) -> Self {
         ServerStatus {
-            up: false,
             down_reason: Some(reason),
             tls: None,
         }
@@ -683,7 +686,6 @@ impl ServerStatus {
             None
         };
         ServerStatus {
-            up: down_reason.is_none(),
             down_reason,
             tls: tls.filter(|_| complete_and_empty),
         }
@@ -1025,7 +1027,7 @@ mod tests {
                 cipher: "TLS_AES_128_GCM_SHA256".into(),
             };
             let s = ServerStatus::of_answer(status, body, body_error, Some(facts));
-            assert_eq!(s.up, up, "{case}");
+            assert_eq!(s.up(), up, "{case}");
             assert_eq!(s.tls.is_some(), tls, "{case}");
         }
     }
