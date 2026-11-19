@@ -22,9 +22,10 @@ a Rust port of the Go [librespeed-cli](https://github.com/librespeed/speedtest-c
 | Linux binaries | [Releases](https://github.com/librespeed/speedtest-cli-rust/releases) for x86_64, aarch64, armv7 and arm (musl) |
 | From source | `cargo build --release`, the binary is `target/release/librespeed-cli` |
 
-Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. It
-fixes only the date and does not make the binary bit-for-bit reproducible, see
-[RELEASING.md](RELEASING.md#how-to-release).
+Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. A value
+other than decimal seconds from 1970 to the end of 9999, an empty one included,
+fails the build. It fixes only the date and does not make the binary
+bit-for-bit reproducible, see [RELEASING.md](RELEASING.md#how-to-release).
 
 ## Usage
 
