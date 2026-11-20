@@ -1,6 +1,7 @@
-//! Records the build date so `--version` can report it.
+//! Records the build date and the revision so `--version` can report them.
 
-use std::process::Command;
+#[path = "src/revision.rs"]
+mod revision;
 
 fn main() {
     // SOURCE_DATE_EPOCH keeps reproducible builds reproducible; OpenWrt and
@@ -19,20 +20,12 @@ fn main() {
 
     // The build date alone cannot identify a build: distro packaging derives
     // SOURCE_DATE_EPOCH from the package, so two builds of different commits
-    // share it. Packagers can pass the revision explicitly; a git checkout
-    // finds it itself.
+    // share it. Packagers can pass the revision explicitly, and the top of a
+    // git checkout finds it itself.
     let revision = std::env::var("LIBRESPEED_REVISION")
         .ok()
         .filter(|r| !r.is_empty())
-        .or_else(|| {
-            Command::new("git")
-                .args(["rev-parse", "--short=12", "HEAD"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|r| !r.is_empty())
-        })
+        .or_else(revision::git_revision)
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=LIBRESPEED_BUILD_DATE={date}");
