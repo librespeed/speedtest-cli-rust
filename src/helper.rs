@@ -146,6 +146,13 @@ pub async fn do_speed_test(
             "IP info: {}\n",
             output::sanitize(&isp_info.processed_string)
         );
+        if let Some(location) = isp_info
+            .approximate_location()
+            .and_then(|location| location.human_readable())
+        {
+            write_ui!(out, "Approximate location: {}\n", location);
+            write_debug!(out, "Approximate location: {}\n", location);
+        }
 
         // Latency and jitter.
         let spinner = if out.quiet {
@@ -343,7 +350,7 @@ pub async fn do_speed_test(
                     name: current_server.name.clone(),
                     url: current_server.server.clone(),
                 },
-                client: Client::new(ip_info),
+                client: Client::with_location(ip_info, isp_info.location.clone()),
                 tls: status.tls.as_ref().map(|t| report::TLSReport {
                     version: t.version.clone(),
                     cipher: t.cipher.clone(),

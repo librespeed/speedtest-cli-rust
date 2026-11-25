@@ -6,7 +6,7 @@
 
 use serde::{Serialize, Serializer};
 
-use crate::defs::IPInfoResponse;
+use crate::defs::{IPInfoResponse, Location};
 use crate::output::sanitize;
 
 /// Renders a float as Go's `strconv.FormatFloat(v, 'f', -1, 64)` does: the
@@ -199,6 +199,8 @@ pub struct ReportServer {
 pub struct Client {
     #[serde(flatten)]
     ip_info: IPInfoResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<Location>,
 }
 
 impl Client {
@@ -208,13 +210,18 @@ impl Client {
     /// `IPInfoResponse` breaks this function rather than reaching the report
     /// with whatever the backend put in it.
     pub fn new(ip_info: IPInfoResponse) -> Self {
+        Self::with_location(ip_info, None)
+    }
+
+    /// Builds the client block with an optional structured location.
+    pub fn with_location(ip_info: IPInfoResponse, location: Option<Location>) -> Self {
         let IPInfoResponse {
             ip,
             hostname,
             city,
             region,
             country,
-            location,
+            location: legacy_location,
             organization,
             postal,
             timezone,
@@ -228,12 +235,13 @@ impl Client {
                 city: sanitize(&city),
                 region: sanitize(&region),
                 country: sanitize(&country),
-                location: sanitize(&location),
+                location: sanitize(&legacy_location),
                 organization: sanitize(&organization),
                 postal: sanitize(&postal),
                 timezone: sanitize(&timezone),
                 readme: sanitize(&readme),
             },
+            location,
         }
     }
 }
@@ -492,13 +500,23 @@ mod tests {
                 name: "Evil\x1b[31m\u{9b}1m\u{202e}txen\u{e0041}".into(),
                 url: "http://evil\u{ad}.example".into(),
             },
-            client: Client::new(IPInfoResponse {
-                ip: "203.0.113.9\x1b[2J".into(),
-                hostname: "h\u{9b}31m.example".into(),
-                organization: "Evil\u{e0041}ISP".into(),
-                timezone: "UTC\u{2028}".into(),
-                ..Default::default()
-            }),
+            client: Client::with_location(
+                IPInfoResponse {
+                    ip: "203.0.113.9\x1b[2J".into(),
+                    hostname: "h\u{9b}31m.example".into(),
+                    organization: "Evil\u{e0041}ISP".into(),
+                    timezone: "UTC\u{2028}".into(),
+                    ..Default::default()
+                },
+                Some(Location {
+                    city: "C\u{200b}ity".into(),
+                    region: "R\u{61c}egion".into(),
+                    country: "X\u{ad}X".into(),
+                    country_name: "Evil\u{202e}Country".into(),
+                    latitude: Some(36.6676),
+                    longitude: Some(-78.3875),
+                }),
+            ),
             share: "https://x/?id=1\u{7f}".into(),
             ..Default::default()
         };
@@ -509,6 +527,10 @@ mod tests {
         assert!(out.contains(r#""hostname":"h31m.example""#), "{out}");
         assert!(out.contains(r#""org":"EvilISP""#), "{out}");
         assert!(out.contains(r#""timezone":"UTC""#), "{out}");
+        assert!(
+            out.contains(r#""location":{"city":"City","region":"Region","country":"XX","countryName":"EvilCountry","latitude":36.6676,"longitude":-78.3875}"#),
+            "{out}"
+        );
         assert!(out.contains(r#""share":"https://x/?id=1""#), "{out}");
         // Nothing that steers a terminal survives anywhere in the document.
         assert_eq!(sanitize(&out), out, "{out}");

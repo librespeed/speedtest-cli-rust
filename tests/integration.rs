@@ -170,14 +170,14 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
             "application/octet-stream",
         )?,
         ("GET", "/getIP.php") => {
-            let json = br#"{"processedString":"203.0.113.7 - Example ISP","rawIspInfo":{"ip":"203.0.113.7","hostname":"host.example","city":"Testville","region":"Testshire","country":"XX","loc":"0,0","org":"AS64496 Example ISP","postal":"00000","timezone":"UTC","readme":"https://ipinfo.io/missingauth"}}"#;
+            let json = br#"{"processedString":"203.0.113.7 - Example ISP","rawIspInfo":{"ip":"203.0.113.7","hostname":"host.example","city":"Testville","region":"Testshire","country":"XX","loc":"0,0","org":"AS64496 Example ISP","postal":"00000","timezone":"UTC","readme":"https://ipinfo.io/missingauth"},"location":{"city":"Testville","region":"Testshire","country":"XX","countryName":"Test Country","latitude":36.6676,"longitude":-78.3875}}"#;
             respond(&mut stream, json, "application/json")?
         }
         // What a malicious or compromised backend could answer: escape
         // sequences, C1 controls, bidi overrides, invisible tag characters and
         // the HTML delimiters Go's JSON encoder escapes.
         ("GET", "/getIP-hostile.php") => {
-            let json = br#"{"processedString":"203.0.113.9\u001b[2J - Evil\u202eISP","rawIspInfo":{"ip":"203.0.113.9\u001b[2J","hostname":"h\u009b31m.example","city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","loc":"0,0\u180e","org":"=Evil\udb40\udc41ISP & <b>","postal":"0\u007f","timezone":"UTC\u2028","readme":"x"}}"#;
+            let json = br#"{"processedString":"203.0.113.9\u001b[2J - Evil\u202eISP","rawIspInfo":{"ip":"203.0.113.9\u001b[2J","hostname":"h\u009b31m.example","city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","loc":"0,0\u180e","org":"=Evil\udb40\udc41ISP & <b>","postal":"0\u007f","timezone":"UTC\u2028","readme":"x"},"location":{"city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","countryName":"Evil\u202eCountry","latitude":"36.6676","longitude":"-78.3875"}}"#;
             respond(&mut stream, json, "application/json")?
         }
         ("POST", "/results/telemetry.php") => {
@@ -339,6 +339,12 @@ fn json_report_has_the_expected_shape() {
     assert_eq!(report["server"]["url"], backend.url());
     assert_eq!(report["client"]["ip"], "203.0.113.7");
     assert_eq!(report["client"]["org"], "AS64496 Example ISP");
+    assert_eq!(report["client"]["location"]["city"], "Testville");
+    assert_eq!(report["client"]["location"]["region"], "Testshire");
+    assert_eq!(report["client"]["location"]["country"], "XX");
+    assert_eq!(report["client"]["location"]["countryName"], "Test Country");
+    assert_eq!(report["client"]["location"]["latitude"], 36.6676);
+    assert_eq!(report["client"]["location"]["longitude"], -78.3875);
     // `readme` is deliberately stripped from the report.
     assert!(report["client"].get("readme").is_none());
 
@@ -767,6 +773,10 @@ fn hostile_backend_text_is_stripped_from_every_output() {
     );
     assert!(raw.contains(r#""hostname":"h31m.example""#), "{raw}");
     assert!(raw.contains(r#""timezone":"UTC""#), "{raw}");
+    assert!(
+        raw.contains(r#""location":{"city":"City","region":"Region","country":"XX","countryName":"EvilCountry","latitude":36.6676,"longitude":-78.3875}"#),
+        "{raw}"
+    );
 
     // The CSV row carries the same cleaned text, including the IP column.
     let out = run(&[
