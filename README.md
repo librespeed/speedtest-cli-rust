@@ -20,11 +20,30 @@ a Rust port of the Go [librespeed-cli](https://github.com/librespeed/speedtest-c
 | OpenWrt | `apk add librespeed-cli-rust`, on 24.10 `opkg install librespeed-cli-rust` |
 | Cargo | `cargo install --locked librespeed-cli` |
 | Linux binaries | [Releases](https://github.com/librespeed/speedtest-cli-rust/releases) for x86_64, aarch64, armv7 and arm (musl) |
-| From source | `cargo build --release`, the binary is `target/release/librespeed-cli` |
+| From source | `cargo build --locked --release`, the binary is `target/release/librespeed-cli` |
 
 Set `SOURCE_DATE_EPOCH` for a reproducible build date in `--version`. It
 fixes only the date and does not make the binary bit-for-bit reproducible, see
 [RELEASING.md](RELEASING.md#how-to-release).
+
+### FreeBSD
+
+Build natively on FreeBSD with Rust/Cargo and the base-system C compiler:
+
+```sh
+cargo test --locked
+cargo build --locked --release
+./target/release/librespeed-cli --version
+```
+
+CI runs the default rustls/HTTP/2 test suite and a release-build smoke test on
+FreeBSD 15.1 amd64. The Go differential test needs a separately built Go client
+and is skipped in this job; it runs in the Linux parity job. This does not
+qualify other FreeBSD releases, architectures or the OpenSSL backend, and does
+not add FreeBSD release downloads. Rust/Cargo are build-time tools only; the
+default binary uses base-system libraries, not a runtime OpenSSL package.
+Use `--source` for local-address binding: `--interface` is not supported on
+FreeBSD and `--fwmark` is Linux-only.
 
 ## Usage
 
