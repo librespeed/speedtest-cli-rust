@@ -124,7 +124,10 @@ impl GetIPResult {
     /// usable as a legacy fallback instead of being discarded.
     pub fn approximate_location(&self) -> Option<Location> {
         if let Some(location) = &self.location {
-            return Some(location.clone());
+            let location = location.normalized();
+            if !location.is_empty() {
+                return Some(location);
+            }
         }
 
         let info = self.ip_info();
@@ -165,27 +168,43 @@ impl Location {
         };
 
         let string = |key: &str| {
-            object
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
+            sanitize(
+                object
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .trim()
+            .to_string()
         };
+
+        let country = ["country", "country_code", "countryCode"]
+            .into_iter()
+            .filter_map(|key| {
+                object
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| sanitize(value).trim().to_string())
+            })
+            .find(|value| !value.is_empty())
+            .unwrap_or_default();
+
+        let country_name = ["countryName", "country_name"]
+            .into_iter()
+            .filter_map(|key| {
+                object
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| sanitize(value).trim().to_string())
+            })
+            .find(|value| !value.is_empty())
+            .unwrap_or_default();
 
         Self {
             city: string("city"),
             region: string("region"),
-            country: string("country"),
-            country_name: object
-                .get("countryName")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    object
-                        .get("country_name")
-                        .and_then(serde_json::Value::as_str)
-                })
-                .unwrap_or_default()
-                .to_string(),
+            country,
+            country_name,
             latitude: parse_valid_coordinate(object.get("latitude"), -90.0, 90.0),
             longitude: parse_valid_coordinate(object.get("longitude"), -180.0, 180.0),
         }
@@ -204,12 +223,23 @@ impl Location {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.city.trim().is_empty()
-            && self.region.trim().is_empty()
-            && self.country.trim().is_empty()
-            && self.country_name.trim().is_empty()
+        sanitize(&self.city).trim().is_empty()
+            && sanitize(&self.region).trim().is_empty()
+            && sanitize(&self.country).trim().is_empty()
+            && sanitize(&self.country_name).trim().is_empty()
             && self.latitude.is_none()
             && self.longitude.is_none()
+    }
+
+    fn normalized(&self) -> Self {
+        Self {
+            city: sanitize(&self.city).trim().to_string(),
+            region: sanitize(&self.region).trim().to_string(),
+            country: sanitize(&self.country).trim().to_string(),
+            country_name: sanitize(&self.country_name).trim().to_string(),
+            latitude: self.valid_latitude(),
+            longitude: self.valid_longitude(),
+        }
     }
 
     fn valid_latitude(&self) -> Option<f64> {
@@ -225,10 +255,12 @@ impl Location {
     /// Formats the approximate location for terminal/report text.
     pub fn human_readable(&self) -> Option<String> {
         let mut place = Vec::new();
-        let country = if self.country_name.trim().is_empty() {
-            self.country.as_str()
+        let country_name = sanitize(&self.country_name).trim().to_string();
+        let country_code = sanitize(&self.country).trim().to_string();
+        let country = if country_name.is_empty() {
+            country_code.as_str()
         } else {
-            self.country_name.as_str()
+            country_name.as_str()
         };
 
         for value in [self.city.as_str(), self.region.as_str(), country] {
@@ -532,6 +564,55 @@ mod tests {
         let parsed: GetIPResult =
             serde_json::from_str(r#"{"processedString":"x"}"#).expect("should parse");
         assert!(parsed.location.is_none());
+    }
+
+    #[test]
+    fn invisible_only_top_city_falls_back_to_legacy_location() {
+        let json = r#"{
+            "processedString":"203.0.113.7 - Example ISP",
+            "rawIspInfo":{
+                "ip":"203.0.113.7",
+                "city":"Legacy City",
+                "region":"Legacy Region",
+                "country":"US",
+                "loc":"36.25,-78.25"
+            },
+            "location":{"city":"\u200b\u2060"}
+        }"#;
+        let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
+        assert!(
+            parsed.location.is_none(),
+            "invisible-only city was retained"
+        );
+
+        let location = parsed.approximate_location().expect("legacy location");
+        assert_eq!(location.city, "Legacy City");
+        assert_eq!(location.region, "Legacy Region");
+        assert_eq!(location.country, "US");
+        assert_eq!(
+            location.human_readable(),
+            Some("Legacy City, Legacy Region, US (latitude 36.25, longitude -78.25)".to_string())
+        );
+    }
+
+    #[test]
+    fn invisible_country_name_falls_back_to_usable_country_code() {
+        for country_key in ["country", "country_code", "countryCode"] {
+            let json = format!(
+                r#"{{"location":{{"city":"Boydton","countryName":"\u200b\u202e","{country_key}":"US"}}}}"#
+            );
+            let parsed: GetIPResult = serde_json::from_str(&json).expect("should parse");
+            let location = parsed.location.expect("usable country code");
+            assert_eq!(
+                location.human_readable(),
+                Some("Boydton, US".to_string()),
+                "for {country_key}"
+            );
+
+            let serialized = serde_json::to_value(&location).expect("serialize");
+            assert_eq!(serialized["country"], "US", "for {country_key}");
+            assert!(serialized.get("countryName").is_none(), "for {country_key}");
+        }
     }
 
     #[test]
