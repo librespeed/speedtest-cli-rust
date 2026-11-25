@@ -92,14 +92,16 @@ one chain and stops at the first step that fails:
    after it is handed that commit instead of resolving the tag again, so a
    tag that moves mid-release cannot split the run across two of them.
 2. **Checks** run [ci.yml](.github/workflows/ci.yml) against that commit:
-   tests on three platforms, both TLS backends, the minimum supported Rust
+   tests on Linux, macOS, Windows and FreeBSD 15.1 amd64, both TLS backends
+   on Linux, the minimum supported Rust
    version, lint, the fuzz targets, the differential test against the Go
    client and `cargo package`, and a tag with a known advisory in its
    `Cargo.lock` stops too. Nothing is built or published until they pass.
 3. **Package the crate** verifies the tag against `version` in `Cargo.toml`
    and builds the `.crate` once, recording its SHA-256. A tag that disagrees
    stops the run here, before a release exists to leave behind.
-4. **Build** cross-builds the musl binaries.
+4. **Build** cross-builds the musl binaries. The FreeBSD CI job checks a native
+   release build but does not publish FreeBSD binaries.
 5. **Publish release** attaches the tarballs and `SHA256SUMS` to a GitHub
    release.
 6. **Publish to crates.io** checks the tag again against the commit it is
