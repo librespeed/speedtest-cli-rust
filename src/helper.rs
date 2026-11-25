@@ -350,7 +350,7 @@ pub async fn do_speed_test(
                     name: current_server.name.clone(),
                     url: current_server.server.clone(),
                 },
-                client: Client::with_location(ip_info, isp_info.location.clone()),
+                client: Client::with_location(ip_info, isp_info.approximate_location()),
                 tls: status.tls.as_ref().map(|t| report::TLSReport {
                     version: t.version.clone(),
                     cipher: t.cipher.clone(),

@@ -170,7 +170,7 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
             "application/octet-stream",
         )?,
         ("GET", "/getIP.php") => {
-            let json = br#"{"processedString":"203.0.113.7 - Example ISP","rawIspInfo":{"ip":"203.0.113.7","hostname":"host.example","city":"Testville","region":"Testshire","country":"XX","loc":"0,0","org":"AS64496 Example ISP","postal":"00000","timezone":"UTC","readme":"https://ipinfo.io/missingauth"},"location":{"city":"Testville","region":"Testshire","country":"XX","countryName":"Test Country","latitude":36.6676,"longitude":-78.3875}}"#;
+            let json = br#"{"processedString":"203.0.113.7 - Example ISP","rawIspInfo":{"ip":"203.0.113.7","hostname":"host.example","city":"Testville","region":"Testshire","country":"XX","loc":"0,0","org":"AS64496 Example ISP","postal":"00000","timezone":"UTC","readme":"https://ipinfo.io/missingauth"}}"#;
             respond(&mut stream, json, "application/json")?
         }
         // What a malicious or compromised backend could answer: escape
@@ -342,9 +342,9 @@ fn json_report_has_the_expected_shape() {
     assert_eq!(report["client"]["location"]["city"], "Testville");
     assert_eq!(report["client"]["location"]["region"], "Testshire");
     assert_eq!(report["client"]["location"]["country"], "XX");
-    assert_eq!(report["client"]["location"]["countryName"], "Test Country");
-    assert_eq!(report["client"]["location"]["latitude"], 36.6676);
-    assert_eq!(report["client"]["location"]["longitude"], -78.3875);
+    assert!(report["client"]["location"].get("countryName").is_none());
+    assert_eq!(report["client"]["location"]["latitude"], 0.0);
+    assert_eq!(report["client"]["location"]["longitude"], 0.0);
     // `readme` is deliberately stripped from the report.
     assert!(report["client"].get("readme").is_none());
 
