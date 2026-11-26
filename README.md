@@ -109,6 +109,13 @@ JSON and CSV reports, ICMP and HTTP ping, IPv4 and IPv6 forcing, source address,
 interface and firewall mark binding, custom CA bundles and the server list
 filters.
 
+When a LibreSpeed server returns optional approximate IP location metadata, JSON
+reports add `client.location` and CSV reports append `City`, `Region`, `Country`,
+`Country Name`, `Latitude`, and `Longitude` after `IP`. The existing JSON client
+fields and the first nine CSV columns retain their previous meanings and
+positions. No browser GPS location is requested. Legacy `rawIspInfo` city,
+region, country, and `loc` fields remain available as fallbacks.
+
 > [!NOTE]
 > Agreement is a test, not a claim. `tests/parity` runs both binaries against
 > the same backend and compares their output, error output and exit status.
@@ -117,8 +124,9 @@ filters.
 
 | Compared | Result |
 | --- | --- |
-| Reports and errors | Same: `--list`, `--csv-header`, `--simple`, `--csv`, `--json`, `--json-stream`, the `--debug` lines, usage errors, error lines and the exit status of a failed run |
+| Reports and errors | Same apart from documented additive location metadata: `--list`, `--simple`, `--csv`, `--json`, `--json-stream`, the `--debug` lines, usage errors, error lines and the exit status of a failed run |
 | `--help` | Every shared option reads the same apart from a typo corrected in `--telemetry-json` |
+| `--csv-header` | Pinned Go emits nine columns; Rust appends six location columns |
 | Only here | `--http2`, and `--version` names this repository instead of the Go one |
 
 ## Differences from the Go implementation
@@ -133,6 +141,11 @@ deliberately different.
   such as bidi overrides and zero-width joiners, and the invisible tag block,
   in terminal, CSV and JSON output alike. The characters are removed, not
   escaped. Go cleans only C0, DEL and C1, and only in terminal output.
+- **Approximate location metadata is additive.** When a server returns location
+  data, Rust adds it to terminal, JSON/JSON-stream and 15-column CSV output
+  while preserving the legacy `processedString` and `rawIspInfo` fields. The
+  pinned Go client retains its legacy terminal/JSON/CSV layouts. No browser GPS
+  or exact device location is requested.
 - **CSV formulas are defused.** A field starting with `=`, `+`, `-` or `@` gets
   a leading single quote, because spreadsheets evaluate what is left after
   unquoting.

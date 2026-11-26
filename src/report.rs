@@ -6,7 +6,7 @@
 
 use serde::{Serialize, Serializer};
 
-use crate::defs::IPInfoResponse;
+use crate::defs::{IPInfoResponse, Location};
 use crate::output::sanitize;
 
 /// Renders a float as Go's `strconv.FormatFloat(v, 'f', -1, 64)` does: the
@@ -67,6 +67,24 @@ fn go_float<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
 /// no quoting, so the field is the digits alone.
 fn csv_float<S: Serializer>(v: &f64, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(&plain_float(*v))
+}
+
+fn csv_optional_latitude<S: Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(value) if value.is_finite() && (-90.0..=90.0).contains(value) => {
+            s.serialize_str(&plain_float(*value))
+        }
+        _ => s.serialize_str(""),
+    }
+}
+
+fn csv_optional_longitude<S: Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(value) if value.is_finite() && (-180.0..=180.0).contains(value) => {
+            s.serialize_str(&plain_float(*value))
+        }
+        _ => s.serialize_str(""),
+    }
 }
 
 /// Serializes a string that came off the wire, with the terminal-steering and
@@ -199,6 +217,8 @@ pub struct ReportServer {
 pub struct Client {
     #[serde(flatten)]
     ip_info: IPInfoResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<Location>,
 }
 
 impl Client {
@@ -208,13 +228,18 @@ impl Client {
     /// `IPInfoResponse` breaks this function rather than reaching the report
     /// with whatever the backend put in it.
     pub fn new(ip_info: IPInfoResponse) -> Self {
+        Self::with_location(ip_info, None)
+    }
+
+    /// Builds the client block with an optional structured location.
+    pub fn with_location(ip_info: IPInfoResponse, location: Option<Location>) -> Self {
         let IPInfoResponse {
             ip,
             hostname,
             city,
             region,
             country,
-            location,
+            location: legacy_location,
             organization,
             postal,
             timezone,
@@ -228,12 +253,13 @@ impl Client {
                 city: sanitize(&city),
                 region: sanitize(&region),
                 country: sanitize(&country),
-                location: sanitize(&location),
+                location: sanitize(&legacy_location),
                 organization: sanitize(&organization),
                 postal: sanitize(&postal),
                 timezone: sanitize(&timezone),
                 readme: sanitize(&readme),
             },
+            location,
         }
     }
 }
@@ -298,10 +324,22 @@ pub struct CSVReport {
     pub share: String,
     #[serde(rename = "IP", serialize_with = "csv_text")]
     pub ip: String,
+    #[serde(rename = "City", serialize_with = "csv_text")]
+    pub city: String,
+    #[serde(rename = "Region", serialize_with = "csv_text")]
+    pub region: String,
+    #[serde(rename = "Country", serialize_with = "csv_text")]
+    pub country: String,
+    #[serde(rename = "Country Name", serialize_with = "csv_text")]
+    pub country_name: String,
+    #[serde(rename = "Latitude", serialize_with = "csv_optional_latitude")]
+    pub latitude: Option<f64>,
+    #[serde(rename = "Longitude", serialize_with = "csv_optional_longitude")]
+    pub longitude: Option<f64>,
 }
 
 /// The CSV column names, in order.
-pub const CSV_HEADERS: [&str; 9] = [
+pub const CSV_HEADERS: [&str; 15] = [
     "Timestamp",
     "Server Name",
     "Address",
@@ -311,6 +349,12 @@ pub const CSV_HEADERS: [&str; 9] = [
     "Upload",
     "Share",
     "IP",
+    "City",
+    "Region",
+    "Country",
+    "Country Name",
+    "Latitude",
+    "Longitude",
 ];
 
 fn writer(delimiter: u8) -> csv::Writer<Vec<u8>> {
@@ -364,11 +408,11 @@ mod tests {
     fn header_uses_the_configured_delimiter() {
         assert_eq!(
             csv_header(b',').unwrap().trim_end(),
-            "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP"
+            "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP,City,Region,Country,Country Name,Latitude,Longitude"
         );
         assert_eq!(
             csv_header(b';').unwrap().trim_end(),
-            "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP"
+            "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP;City;Region;Country;Country Name;Latitude;Longitude"
         );
     }
 
@@ -387,7 +431,26 @@ mod tests {
         let out = csv_rows(&[rep], b',').unwrap();
         assert_eq!(
             out,
-            "2026-08-06T15:41:36.067293+02:00,\"Prague, Czech Republic (CESNET)\",https://speedtest.cesnet.cz,6.36,0.82,228.39,553.97,,\n"
+            "2026-08-06T15:41:36.067293+02:00,\"Prague, Czech Republic (CESNET)\",https://speedtest.cesnet.cz,6.36,0.82,228.39,553.97,,,,,,,,\n"
+        );
+    }
+
+    #[test]
+    fn rows_append_structured_location_columns() {
+        let rep = CSVReport {
+            ip: "203.0.113.7".into(),
+            city: "Boydton".into(),
+            region: "Virginia".into(),
+            country: "US".into(),
+            country_name: "United States".into(),
+            latitude: Some(36.6676),
+            longitude: Some(-78.3875),
+            ..Default::default()
+        };
+        let out = csv_rows(&[rep], b',').unwrap();
+        assert!(
+            out.ends_with(",203.0.113.7,Boydton,Virginia,US,United States,36.6676,-78.3875\n"),
+            "{out}"
         );
     }
 
@@ -407,7 +470,7 @@ mod tests {
         assert!(out.contains(",'@SUM(1+1),"));
         assert!(out.contains(",'-2+3,"));
         // The TAB is stripped first, and what is left still gets the prefix.
-        assert!(out.ends_with(",'=cmd\n"), "{out}");
+        assert!(out.ends_with(",'=cmd,,,,,,\n"), "{out}");
         // A benign value is untouched.
         assert!(!csv_rows(
             &[CSVReport {
@@ -434,7 +497,7 @@ mod tests {
         let out = csv_rows(&[rep], b',').unwrap();
         assert_eq!(
             out,
-            ",Evil[31m,http://evil1m,0,0,0,0,https://x/?id=1,203.0.113.9[2J\n"
+            ",Evil[31m,http://evil1m,0,0,0,0,https://x/?id=1,203.0.113.9[2J,,,,,,\n"
         );
     }
 
@@ -492,13 +555,23 @@ mod tests {
                 name: "Evil\x1b[31m\u{9b}1m\u{202e}txen\u{e0041}".into(),
                 url: "http://evil\u{ad}.example".into(),
             },
-            client: Client::new(IPInfoResponse {
-                ip: "203.0.113.9\x1b[2J".into(),
-                hostname: "h\u{9b}31m.example".into(),
-                organization: "Evil\u{e0041}ISP".into(),
-                timezone: "UTC\u{2028}".into(),
-                ..Default::default()
-            }),
+            client: Client::with_location(
+                IPInfoResponse {
+                    ip: "203.0.113.9\x1b[2J".into(),
+                    hostname: "h\u{9b}31m.example".into(),
+                    organization: "Evil\u{e0041}ISP".into(),
+                    timezone: "UTC\u{2028}".into(),
+                    ..Default::default()
+                },
+                Some(Location {
+                    city: "C\u{200b}ity".into(),
+                    region: "R\u{61c}egion".into(),
+                    country: "X\u{ad}X".into(),
+                    country_name: "Evil\u{202e}Country".into(),
+                    latitude: Some(36.6676),
+                    longitude: Some(-78.3875),
+                }),
+            ),
             share: "https://x/?id=1\u{7f}".into(),
             ..Default::default()
         };
@@ -509,6 +582,10 @@ mod tests {
         assert!(out.contains(r#""hostname":"h31m.example""#), "{out}");
         assert!(out.contains(r#""org":"EvilISP""#), "{out}");
         assert!(out.contains(r#""timezone":"UTC""#), "{out}");
+        assert!(
+            out.contains(r#""location":{"city":"City","region":"Region","country":"XX","countryName":"EvilCountry","latitude":36.6676,"longitude":-78.3875}"#),
+            "{out}"
+        );
         assert!(out.contains(r#""share":"https://x/?id=1""#), "{out}");
         // Nothing that steers a terminal survives anywhere in the document.
         assert_eq!(sanitize(&out), out, "{out}");

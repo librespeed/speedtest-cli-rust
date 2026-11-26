@@ -174,22 +174,48 @@ fn csv_row(line: &str) -> Option<String> {
     if delimiter.is_alphanumeric() || delimiter == '"' {
         return None;
     }
-    let mut fields: Vec<&str> = line.rsplitn(7, delimiter).collect();
-    if fields.len() != 7 {
+    let mut fields = vec!["<TS>".to_string()];
+    let mut field = String::new();
+    let mut quoted = false;
+    let data = after.get(delimiter.len_utf8()..)?;
+    let mut chars = data.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            field.push(ch);
+            if quoted {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                quoted = true;
+            }
+        } else if ch == delimiter && !quoted {
+            fields.push(field.clone());
+            field.clear();
+        } else {
+            field.push(ch);
+        }
+    }
+    fields.push(field);
+    if fields.len() != 9 && fields.len() != 15 {
         return None;
     }
-    fields.reverse();
-    let mut row = vec![fields[0].to_string()];
-    for measured in &fields[1..5] {
-        row.push(if is_go_rounded(measured) {
-            "<NUM>".to_string()
+
+    for index in 3..7 {
+        let raw = fields.get(index)?.trim();
+        let value = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+            raw[1..raw.len() - 1].replace("\"\"", "\"")
         } else {
-            measured.to_string()
-        });
+            raw.to_string()
+        };
+        if is_go_rounded(&value) {
+            fields[index] = "<NUM>".to_string();
+        }
     }
-    row.push(fields[5].to_string());
-    row.push(fields[6].to_string());
-    Some(row.join(&delimiter.to_string()))
+    Some(fields.join(&delimiter.to_string()))
 }
 
 /// The measured members of a report and of a progress event. `seconds` is
@@ -478,6 +504,38 @@ mod tests {
                 r#"[{"timestamp":"2026-09-20T09:07:09.090905+02:00","server":{"name":"Fixture Live","url":"http://127.0.0.1:18080/"},"client":{"ip":"127.0.0.1"},"bytes_sent":14484701184,"bytes_received":0,"ping":0.06,"jitter":0,"upload":44536.7,"download":68285.34,"share":""}]"#
             ),
             r#"[{"timestamp":"<TS>","server":{"name":"Fixture Live","url":"http://127.0.0.1:<LIVE>/"},"client":{"ip":"127.0.0.1"},"bytes_sent":<NUM>,"bytes_received":<NUM>,"ping":<NUM>,"jitter":<NUM>,"upload":<NUM>,"download":<NUM>,"share":""}]"#
+        );
+    }
+
+    #[test]
+    fn csv_rows_support_go_nine_columns() {
+        assert_eq!(
+            one("<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,0.06,0,68285.34,44536.7,,127.0.0.1"),
+            "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn csv_rows_support_rust_location_columns() {
+        assert_eq!(
+            one("<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,0.06,0,68285.34,44536.7,,127.0.0.1,City,Region,XX,,0,"),
+            "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,City,Region,XX,,0,"
+        );
+    }
+
+    #[test]
+    fn csv_rows_preserve_quoting_outside_measurements() {
+        assert_eq!(
+            one("<TS>,\" Leading space\",http://127.0.0.1/<LIVE>/,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\" Leading space\",http://127.0.0.1/<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
+        assert_eq!(
+            one("<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
+        assert_eq!(
+            one("<TS>,\\.,http://127.0.0.1/<LIVE>/,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\\.,http://127.0.0.1/<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
         );
     }
 

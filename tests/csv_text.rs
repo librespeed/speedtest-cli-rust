@@ -1,7 +1,7 @@
-//! The text columns of a CSV report -- Server Name, Address, Share and IP --
-//! are transformed, not merely escaped: characters are removed and a leading
-//! apostrophe can be added, so a parser does not get back what the server
-//! sent. These tests pin that, and the order the two steps run in.
+//! The text columns of a CSV report -- Server Name, Address, Share, IP and
+//! location text -- are transformed, not merely escaped: characters are removed
+//! and a leading apostrophe can be added, so a parser does not get back what
+//! the server sent. These tests pin that, and the order the two steps run in.
 
 use librespeed_cli::report::{csv_rows, CSVReport};
 
@@ -14,6 +14,10 @@ fn stored(value: &str) -> String {
         address: value.into(),
         share: value.into(),
         ip: value.into(),
+        city: value.into(),
+        region: value.into(),
+        country: value.into(),
+        country_name: value.into(),
         ..Default::default()
     };
     let out = csv_rows(&[rep], b',').unwrap();
@@ -21,7 +25,7 @@ fn stored(value: &str) -> String {
         .has_headers(false)
         .from_reader(out.as_bytes());
     let record = reader.records().next().unwrap().unwrap();
-    let columns = [1, 2, 7, 8].map(|i| record.get(i).unwrap().to_string());
+    let columns = [1, 2, 7, 8, 9, 10, 11, 12].map(|i| record.get(i).unwrap().to_string());
     assert!(columns.iter().all(|c| *c == columns[0]), "{columns:?}");
     columns[0].clone()
 }

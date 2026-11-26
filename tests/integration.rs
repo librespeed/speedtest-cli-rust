@@ -177,7 +177,7 @@ fn handle(mut stream: TcpStream, telemetry_hits: Arc<AtomicUsize>) -> std::io::R
         // sequences, C1 controls, bidi overrides, invisible tag characters and
         // the HTML delimiters Go's JSON encoder escapes.
         ("GET", "/getIP-hostile.php") => {
-            let json = br#"{"processedString":"203.0.113.9\u001b[2J - Evil\u202eISP","rawIspInfo":{"ip":"203.0.113.9\u001b[2J","hostname":"h\u009b31m.example","city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","loc":"0,0\u180e","org":"=Evil\udb40\udc41ISP & <b>","postal":"0\u007f","timezone":"UTC\u2028","readme":"x"}}"#;
+            let json = br#"{"processedString":"203.0.113.9\u001b[2J - Evil\u202eISP","rawIspInfo":{"ip":"203.0.113.9\u001b[2J","hostname":"h\u009b31m.example","city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","loc":"0,0\u180e","org":"=Evil\udb40\udc41ISP & <b>","postal":"0\u007f","timezone":"UTC\u2028","readme":"x"},"location":{"city":"C\u200bity","region":"R\u061cegion","country":"X\u00adX","countryName":"Evil\u202eCountry","latitude":"36.6676","longitude":"-78.3875"}}"#;
             respond(&mut stream, json, "application/json")?
         }
         ("POST", "/results/telemetry.php") => {
@@ -241,7 +241,7 @@ fn csv_header_matches_the_go_implementation() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out).trim_end(),
-        "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP"
+        "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP,City,Region,Country,Country Name,Latitude,Longitude"
     );
 }
 
@@ -339,6 +339,12 @@ fn json_report_has_the_expected_shape() {
     assert_eq!(report["server"]["url"], backend.url());
     assert_eq!(report["client"]["ip"], "203.0.113.7");
     assert_eq!(report["client"]["org"], "AS64496 Example ISP");
+    assert_eq!(report["client"]["location"]["city"], "Testville");
+    assert_eq!(report["client"]["location"]["region"], "Testshire");
+    assert_eq!(report["client"]["location"]["country"], "XX");
+    assert!(report["client"]["location"].get("countryName").is_none());
+    assert_eq!(report["client"]["location"]["latitude"], 0.0);
+    assert_eq!(report["client"]["location"]["longitude"], 0.0);
     // `readme` is deliberately stripped from the report.
     assert!(report["client"].get("readme").is_none());
 
@@ -381,12 +387,15 @@ fn csv_report_honours_a_custom_delimiter() {
     assert!(stdout.ends_with('\n'), "unterminated row: {stdout:?}");
     assert!(!stdout.ends_with("\n\n"), "extra blank line: {stdout:?}");
 
-    // The row splits into the nine documented columns.
+    // The row splits into the 15 documented columns.
     let fields: Vec<&str> = stdout.trim_end_matches('\n').split(';').collect();
-    assert_eq!(fields.len(), 9, "unexpected row: {stdout:?}");
+    assert_eq!(fields.len(), 15, "unexpected row: {stdout:?}");
     assert_eq!(fields[1], "Mock csv");
     assert_eq!(fields[2], backend.url());
     assert_eq!(fields[8], "203.0.113.7");
+    assert_eq!(fields[9], "Testville");
+    assert_eq!(fields[10], "Testshire");
+    assert_eq!(fields[11], "XX");
 }
 
 // A header and a body written by consecutive runs have to make one valid file;
@@ -767,6 +776,10 @@ fn hostile_backend_text_is_stripped_from_every_output() {
     );
     assert!(raw.contains(r#""hostname":"h31m.example""#), "{raw}");
     assert!(raw.contains(r#""timezone":"UTC""#), "{raw}");
+    assert!(
+        raw.contains(r#""location":{"city":"City","region":"Region","country":"XX","countryName":"EvilCountry","latitude":36.6676,"longitude":-78.3875}"#),
+        "{raw}"
+    );
 
     // The CSV row carries the same cleaned text, including the IP column.
     let out = run(&[
@@ -783,7 +796,10 @@ fn hostile_backend_text_is_stripped_from_every_output() {
     ]);
     let row = stdout_of(&out);
     assert!(row.contains(",Evil[31mRed1m TXEN tag  & <b>,"), "{row}");
-    assert!(row.ends_with(",203.0.113.9[2J\n"), "{row}");
+    assert!(
+        row.ends_with(",203.0.113.9[2J,City,Region,XX,EvilCountry,36.6676,-78.3875\n"),
+        "{row}"
+    );
 }
 
 // A usage error is reported on both streams, the way the Go client's CLI
@@ -952,12 +968,43 @@ fn debug_output_matches_the_go_clients_lines() {
         stderr.contains(&format!("Testing against Mock debug ({})\n", backend.url())),
         "{stderr}"
     );
+    assert_eq!(
+        stderr.matches("Approximate location:").count(),
+        1,
+        "quiet debug mode should emit one location line: {stderr}"
+    );
     for absent in ["Loaded ", "server(s) responded", "Fastest:", "Probing "] {
         assert!(
             !stderr.contains(absent),
             "{absent:?} is not a Go line: {stderr}"
         );
     }
+}
+
+#[test]
+fn normal_debug_prints_approximate_location_once() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("debug");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "0",
+        "--no-download",
+        "--no-upload",
+        "--debug",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("Approximate location:").count(),
+        1,
+        "normal debug mode should emit one location line: {stderr}"
+    );
 }
 
 // Picking the fastest server logs nothing of its own in the Go client: only
