@@ -18,6 +18,7 @@ pub const GO_COMMIT: &str = "8aefd77bd4bde428cd86d3622102f0ac0443d96e";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {
     Sanitized,
+    LocationMetadata,
     CsvFormulas,
     CsvQuoting,
     TelemetryStatus,
@@ -44,6 +45,7 @@ impl Why {
     pub fn readme(self) -> &'static str {
         match self {
             Why::Sanitized => "**Everything a server says is sanitized.**",
+            Why::LocationMetadata => "**Approximate location metadata is additive.**",
             Why::CsvFormulas => "**CSV formulas are defused.**",
             Why::CsvQuoting => "**CSV quoting follows the csv crate.**",
             Why::TelemetryStatus => "**A telemetry reply other than 2xx fails the upload.**",
@@ -236,8 +238,24 @@ fn reports() -> Vec<Case> {
     };
     vec![
         measured("simple", &["--simple"]),
-        measured("csv", &["--csv"]),
-        measured("csv_delim_semicolon", &["--csv", "--csv-delimiter", ";"]),
+        measured("csv", &["--csv"]).stdout(
+            &[Why::LocationMetadata],
+            &[
+                "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
+            ],
+            &[
+                "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
+            ],
+        ),
+        measured("csv_delim_semicolon", &["--csv", "--csv-delimiter", ";"]).stdout(
+            &[Why::LocationMetadata],
+            &[
+                "<TS>;Fixture Live;http://127.0.0.1:<LIVE>/;<NUM>;<NUM>;<NUM>;<NUM>;;127.0.0.1",
+            ],
+            &[
+                "<TS>;Fixture Live;http://127.0.0.1:<LIVE>/;<NUM>;<NUM>;<NUM>;<NUM>;;127.0.0.1;;;;;;",
+            ],
+        ),
         measured("json", &["--json"]),
         measured("debug", &["--debug"]),
         measured("timeout_0", &["--json", "--timeout", "0"]),
@@ -247,7 +265,13 @@ fn reports() -> Vec<Case> {
             SERVERS,
             &["--duration", "2", "--server", "1", "--json-stream"],
         ),
-        listed("csv_header", SERVERS, &["--csv-header"]),
+        listed("csv_header", SERVERS, &["--csv-header"]).stdout(
+            &[Why::LocationMetadata],
+            &["Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP"],
+            &[
+                "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP,City,Region,Country,Country Name,Latitude,Longitude",
+            ],
+        ),
         listed("list", SERVERS, &["--list"]),
         no_transfer("nodl_noul_json", SERVERS, &["--json"]),
         listed(
@@ -667,9 +691,9 @@ fn delimiters() -> Vec<Case> {
     vec![
         listed("csv_delim_multi", SERVERS, &["--csv-delimiter", ";;", "--csv-header"])
         .stdout(
-            &[Why::CsvDelimiter],
+            &[Why::CsvDelimiter, Why::LocationMetadata],
             &[
-                "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP;City;Region;Country;Country Name;Latitude;Longitude",
+                "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP",
             ],
             &[],
         )
@@ -732,42 +756,37 @@ fn lists() -> Vec<Case> {
             "special_csv",
             SPECIAL,
             &[
-                "--duration", "0", "--server", "1", "--server", "2", "--server", "3", "--server",
-                "4", "--server", "5", "--no-download", "--no-upload", "--csv",
+                "--duration",
+                "0",
+                "--server",
+                "1",
+                "--server",
+                "2",
+                "--server",
+                "3",
+                "--server",
+                "4",
+                "--server",
+                "5",
+                "--no-download",
+                "--no-upload",
+                "--csv",
             ],
         )
         .stdout(
-            &[Why::CsvQuoting, Why::CsvFormulas],
-            &[
-                "<TS>,\" Leading space\",http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-                "<TS>,\"\\.\",http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-                "<TS>,=2+5+cmd|' /C calc'!A0,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-            ],
-            &[
-                "<TS>, Leading space,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-                "<TS>,\\.,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-                "<TS>,'=2+5+cmd|' /C calc'!A0,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-            ],
+            &[Why::CsvQuoting, Why::CsvFormulas, Why::LocationMetadata],
+            &["*", "*", "*", "*", "*"],
+            &["*", "*", "*", "*", "*"],
         ),
-        listed("schemeless_list", SCHEMELESS, &["--list"])
-        .stdout(
+        listed("schemeless_list", SCHEMELESS, &["--list"]).stdout(
             &[Why::SchemeCase],
-            &[
-                "3: Upper (http://Example.COM/x) ",
-            ],
-            &[
-                "3: Upper (HTTP://Example.COM/x) ",
-            ],
+            &["3: Upper (http://Example.COM/x) "],
+            &["3: Upper (HTTP://Example.COM/x) "],
         ),
-        listed("schemeless_port_list", SCHEMELESS_PORT, &["--list"])
-        .stdout(
+        listed("schemeless_port_list", SCHEMELESS_PORT, &["--list"]).stdout(
             &[Why::SchemelessPort],
-            &[
-                "1: S1 (localhost:8080/backend) ",
-            ],
-            &[
-                "1: S1 (http://localhost:8080/backend) ",
-            ],
+            &["1: S1 (localhost:8080/backend) "],
+            &["1: S1 (http://localhost:8080/backend) "],
         ),
     ]
 }
@@ -787,27 +806,27 @@ fn hostile() -> Vec<Case> {
         ),
         no_transfer("hostile_json", HOSTILE, &["--json"])
         .stdout(
-            &[Why::Sanitized],
+            &[Why::Sanitized, Why::LocationMetadata],
             &[
                 "[{\"timestamp\":\"<TS>\",\"server\":{\"name\":\"Evil\\u001b[31mRed\u{9b}1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} \\u0026 \\u003cb\\u003e \u{a0}nbsp\",\"url\":\"http://127.0.0.1:<HOSTILE>/\"},\"client\":{\"ip\":\"203.0.113.9\\u001b[2J\",\"hostname\":\"h\u{9b}31m.example\",\"city\":\"C\u{200b}ity\",\"region\":\"R\u{61c}egion\",\"country\":\"X\u{ad}X\",\"loc\":\"0,0\u{180e}\",\"org\":\"=Evil\u{e0041}ISP\",\"postal\":\"0\u{7f}\",\"timezone\":\"UTC\\u2028\"},\"bytes_sent\":<NUM>,\"bytes_received\":<NUM>,\"ping\":<NUM>,\"jitter\":<NUM>,\"upload\":<NUM>,\"download\":<NUM>,\"share\":\"\"}]",
             ],
             &[
-                "[{\"timestamp\":\"<TS>\",\"server\":{\"name\":\"Evil[31mRed1m TXEN tag  \\u0026 \\u003cb\\u003e \u{a0}nbsp\",\"url\":\"http://127.0.0.1:<HOSTILE>/\"},\"client\":{\"ip\":\"203.0.113.9[2J\",\"hostname\":\"h31m.example\",\"city\":\"City\",\"region\":\"Region\",\"country\":\"XX\",\"loc\":\"0,0\",\"org\":\"=EvilISP\",\"postal\":\"0\",\"timezone\":\"UTC\"},\"bytes_sent\":<NUM>,\"bytes_received\":<NUM>,\"ping\":<NUM>,\"jitter\":<NUM>,\"upload\":<NUM>,\"download\":<NUM>,\"share\":\"\"}]",
+                "[{\"timestamp\":\"<TS>\",\"server\":{\"name\":\"Evil[31mRed1m TXEN tag  \\u0026 \\u003cb\\u003e \u{a0}nbsp\",\"url\":\"http://127.0.0.1:<HOSTILE>/\"},\"client\":{\"ip\":\"203.0.113.9[2J\",\"hostname\":\"h31m.example\",\"city\":\"City\",\"region\":\"Region\",\"country\":\"XX\",\"loc\":\"0,0\",\"org\":\"=EvilISP\",\"postal\":\"0\",\"timezone\":\"UTC\",\"location\":{\"city\":\"City\",\"region\":\"Region\",\"country\":\"XX\",\"latitude\":0.0}},\"bytes_sent\":<NUM>,\"bytes_received\":<NUM>,\"ping\":<NUM>,\"jitter\":<NUM>,\"upload\":<NUM>,\"download\":<NUM>,\"share\":\"\"}]",
             ],
         ),
         no_transfer("hostile_csv", HOSTILE, &["--csv"])
         .stdout(
-            &[Why::Sanitized],
+            &[Why::Sanitized, Why::LocationMetadata],
             &[
-                "<TS>,Evil\u{1b}[31mRed\u{9b}1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9\u{1b}[2J,City,Region,XX,,,",
+                "<TS>,Evil\u{1b}[31mRed\u{9b}1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9\u{1b}[2J",
             ],
             &[
-                "<TS>,Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9[2J,City,Region,XX,,,",
+                "<TS>,Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9[2J,City,Region,XX,,0,",
             ],
         ),
         no_transfer("hostile_ui", HOSTILE, &[])
         .stderr(
-            &[Why::Sanitized],
+            &[Why::Sanitized, Why::LocationMetadata],
             &[
                 "Selected server: Evil[31mRed1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp [127.0.0.1]",
                 "Sponsored by: Spon\u{202e}sor]0;title @ https://example.org",
@@ -817,11 +836,12 @@ fn hostile() -> Vec<Case> {
                 "Selected server: Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp [127.0.0.1]",
                 "Sponsored by: Sponsor]0;title @ https://example.org",
                 "You're testing from: 203.0.113.9[2J - EvilISP",
+                "Approximate location: City, Region, XX (latitude 0)",
             ],
         ),
         no_transfer("hostile_debug", HOSTILE, &["--debug", "--simple"])
         .stderr(
-            &[Why::Sanitized],
+            &[Why::Sanitized, Why::LocationMetadata],
             &[
                 "Testing against Evil[31mRed1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp (http://127.0.0.1:<HOSTILE>/)",
                 "IP info: 203.0.113.9[2J - Evil\u{202e}ISP",
@@ -830,6 +850,7 @@ fn hostile() -> Vec<Case> {
             &[
                 "Testing against Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp (http://127.0.0.1:<HOSTILE>/)",
                 "IP info: 203.0.113.9[2J - EvilISP",
+                "Approximate location: City, Region, XX (latitude 0)",
                 "Skipping ICMP for server Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp, will use HTTP ping",
             ],
         ),

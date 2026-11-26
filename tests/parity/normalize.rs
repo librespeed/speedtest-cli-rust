@@ -174,22 +174,45 @@ fn csv_row(line: &str) -> Option<String> {
     if delimiter.is_alphanumeric() || delimiter == '"' {
         return None;
     }
-    let mut fields: Vec<&str> = line.rsplitn(7, delimiter).collect();
-    if fields.len() != 7 {
+
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter as u8)
+        .has_headers(false)
+        .from_reader(line.as_bytes());
+    let record = reader.records().next()?.ok()?;
+    if record.len() != 9 && record.len() != 15 {
         return None;
     }
-    fields.reverse();
-    let mut row = vec![fields[0].to_string()];
-    for measured in &fields[1..5] {
+
+    let mut row = vec![
+        record.get(0)?.to_string(),
+        record.get(1)?.to_string(),
+        record.get(2)?.to_string(),
+    ];
+    for index in 3..7 {
+        let measured = record.get(index)?;
         row.push(if is_go_rounded(measured) {
             "<NUM>".to_string()
         } else {
             measured.to_string()
         });
     }
-    row.push(fields[5].to_string());
-    row.push(fields[6].to_string());
-    Some(row.join(&delimiter.to_string()))
+    row.push(record.get(7)?.to_string());
+    row.push(record.get(8)?.to_string());
+
+    if record.len() == 15 {
+        for index in 9..15 {
+            row.push(record.get(index)?.to_string());
+        }
+    }
+
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(delimiter as u8)
+        .has_headers(false)
+        .from_writer(Vec::new());
+    writer.write_record(row).ok()?;
+    let rendered = String::from_utf8(writer.into_inner().ok()?).ok()?;
+    Some(rendered.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// The measured members of a report and of a progress event. `seconds` is
@@ -478,6 +501,22 @@ mod tests {
                 r#"[{"timestamp":"2026-09-20T09:07:09.090905+02:00","server":{"name":"Fixture Live","url":"http://127.0.0.1:18080/"},"client":{"ip":"127.0.0.1"},"bytes_sent":14484701184,"bytes_received":0,"ping":0.06,"jitter":0,"upload":44536.7,"download":68285.34,"share":""}]"#
             ),
             r#"[{"timestamp":"<TS>","server":{"name":"Fixture Live","url":"http://127.0.0.1:<LIVE>/"},"client":{"ip":"127.0.0.1"},"bytes_sent":<NUM>,"bytes_received":<NUM>,"ping":<NUM>,"jitter":<NUM>,"upload":<NUM>,"download":<NUM>,"share":""}]"#
+        );
+    }
+
+    #[test]
+    fn csv_rows_support_go_nine_columns() {
+        assert_eq!(
+            one("<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,0.06,0,68285.34,44536.7,,127.0.0.1"),
+            "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn csv_rows_support_rust_location_columns() {
+        assert_eq!(
+            one("<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,0.06,0,68285.34,44536.7,,127.0.0.1,City,Region,XX,,0,"),
+            "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,City,Region,XX,,0,"
         );
     }
 
