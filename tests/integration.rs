@@ -241,7 +241,7 @@ fn csv_header_matches_the_go_implementation() {
     assert!(out.status.success());
     assert_eq!(
         stdout_of(&out).trim_end(),
-        "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP"
+        "Timestamp,Server Name,Address,Ping,Jitter,Download,Upload,Share,IP,City,Region,Country,Country Name,Latitude,Longitude"
     );
 }
 
@@ -387,12 +387,15 @@ fn csv_report_honours_a_custom_delimiter() {
     assert!(stdout.ends_with('\n'), "unterminated row: {stdout:?}");
     assert!(!stdout.ends_with("\n\n"), "extra blank line: {stdout:?}");
 
-    // The row splits into the nine documented columns.
+    // The row splits into the 15 documented columns.
     let fields: Vec<&str> = stdout.trim_end_matches('\n').split(';').collect();
-    assert_eq!(fields.len(), 9, "unexpected row: {stdout:?}");
+    assert_eq!(fields.len(), 15, "unexpected row: {stdout:?}");
     assert_eq!(fields[1], "Mock csv");
     assert_eq!(fields[2], backend.url());
     assert_eq!(fields[8], "203.0.113.7");
+    assert_eq!(fields[9], "Testville");
+    assert_eq!(fields[10], "Testshire");
+    assert_eq!(fields[11], "XX");
 }
 
 // A header and a body written by consecutive runs have to make one valid file;
@@ -793,7 +796,10 @@ fn hostile_backend_text_is_stripped_from_every_output() {
     ]);
     let row = stdout_of(&out);
     assert!(row.contains(",Evil[31mRed1m TXEN tag  & <b>,"), "{row}");
-    assert!(row.ends_with(",203.0.113.9[2J\n"), "{row}");
+    assert!(
+        row.ends_with(",203.0.113.9[2J,City,Region,XX,EvilCountry,36.6676,-78.3875\n"),
+        "{row}"
+    );
 }
 
 // A usage error is reported on both streams, the way the Go client's CLI

@@ -328,6 +328,7 @@ pub async fn do_speed_test(
         if cli.csv {
             // The text fields came off the wire; the report sanitizes and
             // defuses them as it renders them.
+            let location = isp_info.approximate_location();
             reps_csv.push(CSVReport {
                 timestamp: report::timestamp_now(),
                 name: current_server.name.clone(),
@@ -338,6 +339,30 @@ pub async fn do_speed_test(
                 upload: round2(upload_value),
                 share: share_link.clone(),
                 ip: isp_info.ip(),
+                city: location
+                    .as_ref()
+                    .map(|location| location.city.clone())
+                    .unwrap_or_default(),
+                region: location
+                    .as_ref()
+                    .map(|location| location.region.clone())
+                    .unwrap_or_default(),
+                country: location
+                    .as_ref()
+                    .map(|location| location.country.clone())
+                    .unwrap_or_default(),
+                country_name: location
+                    .as_ref()
+                    .map(|location| location.country_name.clone())
+                    .unwrap_or_default(),
+                latitude: location
+                    .as_ref()
+                    .and_then(|location| location.latitude)
+                    .filter(|value| value.is_finite() && (-90.0..=90.0).contains(value)),
+                longitude: location
+                    .as_ref()
+                    .and_then(|location| location.longitude)
+                    .filter(|value| value.is_finite() && (-180.0..=180.0).contains(value)),
             });
         } else if cli.json || cli.json_stream {
             let mut ip_info = isp_info.ip_info();

@@ -130,17 +130,11 @@ impl GetIPResult {
             }
         }
 
-        let info = self.ip_info();
-        let mut location = Location::from_ip_info(&info);
-
-        if let serde_json::Value::Object(raw) = &self.raw_isp_info {
-            for key in ["countryName", "country_name"] {
-                if let Some(value) = raw.get(key).and_then(serde_json::Value::as_str) {
-                    location.country_name = value.to_string();
-                    break;
-                }
-            }
-        }
+        let location = if let serde_json::Value::Object(raw) = &self.raw_isp_info {
+            Location::from_value(&serde_json::Value::Object(raw.clone()))
+        } else {
+            Location::from_ip_info(&self.ip_info())
+        };
 
         if location.is_empty() {
             None
@@ -167,9 +161,12 @@ impl Location {
             return Self::default();
         };
 
-        let string = |key: &str| {
+        let nested_location = object
+            .get("location")
+            .and_then(serde_json::Value::as_object);
+        let string_from = |source: &serde_json::Map<String, serde_json::Value>, key: &str| {
             sanitize(
-                object
+                source
                     .get(key)
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default(),
@@ -177,36 +174,74 @@ impl Location {
             .trim()
             .to_string()
         };
+        let string = |key: &str| {
+            let top = string_from(object, key);
+            if top.is_empty() {
+                nested_location
+                    .map(|source| string_from(source, key))
+                    .unwrap_or_default()
+            } else {
+                top
+            }
+        };
 
-        let country = ["country", "country_code", "countryCode"]
+        let raw_country = string("country");
+        let country_name_explicit = ["countryName", "country_name"]
             .into_iter()
             .filter_map(|key| {
-                object
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(|value| sanitize(value).trim().to_string())
+                let top = string_from(object, key);
+                if top.is_empty() {
+                    nested_location
+                        .map(|source| string_from(source, key))
+                        .filter(|value| !value.is_empty())
+                } else {
+                    Some(top)
+                }
             })
             .find(|value| !value.is_empty())
             .unwrap_or_default();
-
-        let country_name = ["countryName", "country_name"]
-            .into_iter()
-            .filter_map(|key| {
-                object
-                    .get(key)
-                    .and_then(serde_json::Value::as_str)
-                    .map(|value| sanitize(value).trim().to_string())
-            })
-            .find(|value| !value.is_empty())
-            .unwrap_or_default();
+        let country_code_alias = [
+            "countryCode",
+            "country_code",
+            "iso_code",
+            "country_iso_code",
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            let top = string_from(object, key);
+            if top.is_empty() {
+                nested_location
+                    .map(|source| string_from(source, key))
+                    .filter(|value| !value.is_empty())
+            } else {
+                Some(top)
+            }
+        })
+        .find(|value| !value.is_empty())
+        .unwrap_or_default();
+        let country = if !country_code_alias.is_empty() {
+            country_code_alias
+        } else if looks_like_country_code(&raw_country) {
+            raw_country.clone()
+        } else {
+            String::new()
+        };
+        let country_name = if !country_name_explicit.is_empty() {
+            country_name_explicit
+        } else if !raw_country.is_empty() && !looks_like_country_code(&raw_country) {
+            raw_country
+        } else {
+            String::new()
+        };
+        let (latitude, longitude) = parse_location_coordinates(object);
 
         Self {
             city: string("city"),
             region: string("region"),
             country,
             country_name,
-            latitude: parse_valid_coordinate(object.get("latitude"), -90.0, 90.0),
-            longitude: parse_valid_coordinate(object.get("longitude"), -180.0, 180.0),
+            latitude,
+            longitude,
         }
     }
 
@@ -276,6 +311,8 @@ impl Location {
                 format_coordinate(latitude),
                 format_coordinate(longitude)
             )),
+            (Some(latitude), None) => Some(format!("latitude {}", format_coordinate(latitude))),
+            (None, Some(longitude)) => Some(format!("longitude {}", format_coordinate(longitude))),
             _ => None,
         };
 
@@ -374,6 +411,63 @@ fn parse_valid_coordinate(
     }?;
 
     (parsed.is_finite() && (minimum..=maximum).contains(&parsed)).then_some(parsed)
+}
+
+fn looks_like_country_code(value: &str) -> bool {
+    value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_alphabetic())
+}
+
+fn first_valid_coordinate(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+    minimum: f64,
+    maximum: f64,
+) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| parse_valid_coordinate(object.get(*key), minimum, maximum))
+}
+
+fn parse_location_coordinates(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<f64>, Option<f64>) {
+    let mut latitude = first_valid_coordinate(object, &["latitude", "lat"], -90.0, 90.0);
+    let mut longitude = first_valid_coordinate(object, &["longitude", "lon"], -180.0, 180.0);
+
+    for container in ["coordinates", "location"] {
+        if let Some(nested) = object.get(container).and_then(serde_json::Value::as_object) {
+            if latitude.is_none() {
+                latitude = first_valid_coordinate(nested, &["latitude", "lat"], -90.0, 90.0);
+            }
+            if longitude.is_none() {
+                longitude = first_valid_coordinate(nested, &["longitude", "lon"], -180.0, 180.0);
+            }
+            if latitude.is_none() || longitude.is_none() {
+                if let Some(loc) = nested.get("loc").and_then(serde_json::Value::as_str) {
+                    let (loc_latitude, loc_longitude) = parse_location_string(loc);
+                    if latitude.is_none() {
+                        latitude = loc_latitude;
+                    }
+                    if longitude.is_none() {
+                        longitude = loc_longitude;
+                    }
+                }
+            }
+        }
+    }
+
+    for key in ["loc", "location"] {
+        if let Some(loc) = object.get(key).and_then(serde_json::Value::as_str) {
+            let (loc_latitude, loc_longitude) = parse_location_string(loc);
+            if latitude.is_none() {
+                latitude = loc_latitude;
+            }
+            if longitude.is_none() {
+                longitude = loc_longitude;
+            }
+        }
+    }
+
+    (latitude, longitude)
 }
 
 fn parse_location_string(value: &str) -> (Option<f64>, Option<f64>) {
@@ -546,6 +640,48 @@ mod tests {
             assert_eq!(
                 location.longitude, want_longitude,
                 "for longitude {longitude}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_location_accepts_coordinate_aliases_and_fallbacks() {
+        for json in [
+            r#"{"location":{"city":"Boydton","latitude":91,"longitude":181,"lat":"36.6676","lon":"-78.3875","loc":"37,-79"}}"#,
+            r#"{"location":{"city":"Boydton","coordinates":{"latitude":"36.6676","longitude":"-78.3875"}}}"#,
+            r#"{"location":{"city":"Boydton","loc":"36.6676,-78.3875"}}"#,
+            r#"{"location":{"city":"Boydton","location":{"lat":36.6676,"lon":-78.3875}}}"#,
+        ] {
+            let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
+            let location = parsed.location.expect("coordinate fallback");
+            assert_eq!(location.latitude, Some(36.6676), "for {json}");
+            assert_eq!(location.longitude, Some(-78.3875), "for {json}");
+        }
+    }
+
+    #[test]
+    fn partial_location_place_and_coordinate_metadata_remains_usable() {
+        for (json, want) in [
+            (
+                r#"{"location":{"city":"Boydton","latitude":36.6676}}"#,
+                "Boydton (latitude 36.6676)",
+            ),
+            (
+                r#"{"location":{"country":"US","longitude":-78.3875}}"#,
+                "US (longitude -78.3875)",
+            ),
+            (r#"{"location":{"latitude":36.6676}}"#, "latitude 36.6676"),
+            (
+                r#"{"location":{"longitude":-78.3875}}"#,
+                "longitude -78.3875",
+            ),
+        ] {
+            let parsed: GetIPResult = serde_json::from_str(json).expect("should parse");
+            let location = parsed.location.expect("partial location");
+            assert_eq!(
+                location.human_readable(),
+                Some(want.to_string()),
+                "for {json}"
             );
         }
     }

@@ -669,7 +669,7 @@ fn delimiters() -> Vec<Case> {
         .stdout(
             &[Why::CsvDelimiter],
             &[
-                "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP",
+                "Timestamp;Server Name;Address;Ping;Jitter;Download;Upload;Share;IP;City;Region;Country;Country Name;Latitude;Longitude",
             ],
             &[],
         )
@@ -799,10 +799,10 @@ fn hostile() -> Vec<Case> {
         .stdout(
             &[Why::Sanitized],
             &[
-                "<TS>,Evil\u{1b}[31mRed\u{9b}1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9\u{1b}[2J",
+                "<TS>,Evil\u{1b}[31mRed\u{9b}1m \u{202e}TXEN\u{202c} \u{e0041}\u{e0042}tag \u{61c}\u{ad}\u{180e} & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9\u{1b}[2J,City,Region,XX,,,",
             ],
             &[
-                "<TS>,Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9[2J",
+                "<TS>,Evil[31mRed1m TXEN tag  & <b> \u{a0}nbsp,http://127.0.0.1:<HOSTILE>/,<NUM>,<NUM>,<NUM>,<NUM>,,203.0.113.9[2J,City,Region,XX,,,",
             ],
         ),
         no_transfer("hostile_ui", HOSTILE, &[])

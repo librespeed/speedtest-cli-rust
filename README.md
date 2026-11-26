@@ -109,6 +109,13 @@ JSON and CSV reports, ICMP and HTTP ping, IPv4 and IPv6 forcing, source address,
 interface and firewall mark binding, custom CA bundles and the server list
 filters.
 
+When a LibreSpeed server returns optional approximate IP location metadata, JSON
+reports add `client.location` and CSV reports append `City`, `Region`, `Country`,
+`Country Name`, `Latitude`, and `Longitude` after `IP`. The existing JSON client
+fields and the first nine CSV columns retain their previous meanings and
+positions. No browser GPS location is requested. Legacy `rawIspInfo` city,
+region, country, and `loc` fields remain available as fallbacks.
+
 > [!NOTE]
 > Agreement is a test, not a claim. `tests/parity` runs both binaries against
 > the same backend and compares their output, error output and exit status.
