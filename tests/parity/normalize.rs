@@ -174,45 +174,48 @@ fn csv_row(line: &str) -> Option<String> {
     if delimiter.is_alphanumeric() || delimiter == '"' {
         return None;
     }
-
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter as u8)
-        .has_headers(false)
-        .from_reader(line.as_bytes());
-    let record = reader.records().next()?.ok()?;
-    if record.len() != 9 && record.len() != 15 {
+    let mut fields = vec!["<TS>".to_string()];
+    let mut field = String::new();
+    let mut quoted = false;
+    let data = after.get(delimiter.len_utf8()..)?;
+    let mut chars = data.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            field.push(ch);
+            if quoted {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                quoted = true;
+            }
+        } else if ch == delimiter && !quoted {
+            fields.push(field.clone());
+            field.clear();
+        } else {
+            field.push(ch);
+        }
+    }
+    fields.push(field);
+    if fields.len() != 9 && fields.len() != 15 {
         return None;
     }
 
-    let mut row = vec![
-        record.get(0)?.to_string(),
-        record.get(1)?.to_string(),
-        record.get(2)?.to_string(),
-    ];
     for index in 3..7 {
-        let measured = record.get(index)?;
-        row.push(if is_go_rounded(measured) {
-            "<NUM>".to_string()
+        let raw = fields.get(index)?.trim();
+        let value = if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+            raw[1..raw.len() - 1].replace("\"\"", "\"")
         } else {
-            measured.to_string()
-        });
-    }
-    row.push(record.get(7)?.to_string());
-    row.push(record.get(8)?.to_string());
-
-    if record.len() == 15 {
-        for index in 9..15 {
-            row.push(record.get(index)?.to_string());
+            raw.to_string()
+        };
+        if is_go_rounded(&value) {
+            fields[index] = "<NUM>".to_string();
         }
     }
-
-    let mut writer = csv::WriterBuilder::new()
-        .delimiter(delimiter as u8)
-        .has_headers(false)
-        .from_writer(Vec::new());
-    writer.write_record(row).ok()?;
-    let rendered = String::from_utf8(writer.into_inner().ok()?).ok()?;
-    Some(rendered.trim_end_matches(['\n', '\r']).to_string())
+    Some(fields.join(&delimiter.to_string()))
 }
 
 /// The measured members of a report and of a progress event. `seconds` is
@@ -517,6 +520,18 @@ mod tests {
         assert_eq!(
             one("<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,0.06,0,68285.34,44536.7,,127.0.0.1,City,Region,XX,,0,"),
             "<TS>,Fixture Live,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,City,Region,XX,,0,"
+        );
+    }
+
+    #[test]
+    fn csv_rows_preserve_quoting_outside_measurements() {
+        assert_eq!(
+            one("<TS>,\" Leading space\",http://127.0.0.1/<LIVE>/,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\" Leading space\",http://127.0.0.1/<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
+        assert_eq!(
+            one("<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
         );
     }
 
