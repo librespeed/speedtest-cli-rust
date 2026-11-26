@@ -778,14 +778,14 @@ fn lists() -> Vec<Case> {
             &[
                 "<TS>,AT&T <Lab>,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
                 "<TS>,\" Leading space\",http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
-                "<TS>,\\\\.,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
+                "<TS>,\"\\.\",http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
                 "<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1:<LIVE>,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
                 "<TS>,=2+5+cmd|' /C calc'!A0,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1",
             ],
             &[
                 "<TS>,AT&T <Lab>,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
                 "<TS>, Leading space,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
-                "<TS>,\\\\.,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
+                "<TS>,\\.,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
                 "<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1:<LIVE>,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
                 "<TS>,'=2+5+cmd|' /C calc'!A0,http://127.0.0.1:<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1,,,,,,",
             ],

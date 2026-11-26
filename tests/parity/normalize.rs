@@ -533,6 +533,10 @@ mod tests {
             one("<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,0.06,0,1,2,,127.0.0.1"),
             "<TS>,\"Quote\"\"d;semi,comma\",http://127.0.0.1/<LIVE>,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
         );
+        assert_eq!(
+            one("<TS>,\\.,http://127.0.0.1/<LIVE>/,0.06,0,1,2,,127.0.0.1"),
+            "<TS>,\\.,http://127.0.0.1/<LIVE>/,<NUM>,<NUM>,<NUM>,<NUM>,,127.0.0.1"
+        );
     }
 
     #[test]
