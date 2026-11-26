@@ -968,12 +968,43 @@ fn debug_output_matches_the_go_clients_lines() {
         stderr.contains(&format!("Testing against Mock debug ({})\n", backend.url())),
         "{stderr}"
     );
+    assert_eq!(
+        stderr.matches("Approximate location:").count(),
+        1,
+        "quiet debug mode should emit one location line: {stderr}"
+    );
     for absent in ["Loaded ", "server(s) responded", "Fastest:", "Probing "] {
         assert!(
             !stderr.contains(absent),
             "{absent:?} is not a Go line: {stderr}"
         );
     }
+}
+
+#[test]
+fn normal_debug_prints_approximate_location_once() {
+    let backend = MockBackend::start();
+    let list = backend.server_list("debug");
+
+    let out = run(&[
+        "--local-json",
+        list.to_str().unwrap(),
+        "--server",
+        "1",
+        "--no-icmp",
+        "--duration",
+        "0",
+        "--no-download",
+        "--no-upload",
+        "--debug",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("Approximate location:").count(),
+        1,
+        "normal debug mode should emit one location line: {stderr}"
+    );
 }
 
 // Picking the fastest server logs nothing of its own in the Go client: only

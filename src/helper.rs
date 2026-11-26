@@ -150,8 +150,11 @@ pub async fn do_speed_test(
             .approximate_location()
             .and_then(|location| location.human_readable())
         {
-            write_ui!(out, "Approximate location: {}\n", location);
-            write_debug!(out, "Approximate location: {}\n", location);
+            if out.quiet {
+                write_debug!(out, "Approximate location: {}\n", location);
+            } else {
+                write_ui!(out, "Approximate location: {}\n", location);
+            }
         }
 
         // Latency and jitter.
